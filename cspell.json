@@ -1,0 +1,8 @@
+{
+    "languageSettings": [
+        {
+            "languageId": "plaintext",
+            "dictionaries": ["en_US", "softwareTerms", "rust"]
+        }
+    ]
+}

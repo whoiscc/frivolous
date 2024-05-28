@@ -1,0 +1,9 @@
+let fib
+set fib = function (n)
+    if n <= 1 begin
+        1
+    else
+        fib(n - 1) + fib(n - 2)
+    end
+
+trace(fib(10))
