@@ -2,13 +2,28 @@ let length
 let append
 let debug_format
 
-let Linked = function (Type)
-    let LinkedType = type Item = Type end
+let LinkedLayoutType = type layout
+    * Nil
+    * Cons
+end
+let Nil = type layout
+let Cons = type layout
+    * head
+    * tail
+end
+let LinkedLayout = LinkedLayoutType
+    Nil = Nil
+    Cons = Cons
+end
+
+let Linked = function (ItemType)
+    let LinkedType = type LinkedLayout
+    LinkedType.>Item = ItemType
 
     Debug[LinkedType].format = debug_format(LinkedType)
 
-    LinkedType.length = length
-    LinkedType.append = append
+    LinkedType.>length = length
+    LinkedType.>append = append
     LinkedType
 end
 
@@ -16,9 +31,9 @@ let debug_format = function (LinkedType) function (linked)
     match linked
         variant Nil "Nil"
         variant Cons begin
-            let s = Debug[LinkedType.Item].format(linked.head)
-            String.append(s, " : ")
-            String.append(s, Debug[LinkedType].format(linked.tail))
+            let s = Debug[LinkedType.>Item].format(linked.head)
+            String.>append(s, " : ")
+            String.>append(s, Debug[LinkedType].format(linked.tail))
             s
         end
     end
@@ -32,7 +47,6 @@ let length = function (linked)
 let append = function (linked1, linked2)
     set linked1 = match linked1
         variant Nil linked2
-        ; a little bit confusing here to match `Cons` then immediately construct `Cons`
         variant Cons begin
             append(linked1.tail, linked2)
             linked1
@@ -41,20 +55,18 @@ let append = function (linked1, linked2)
 
 let LinkedInt = Linked(Int)
 
-let xs = enum Cons struct
-    head = 42
-    tail = enum Nil
-end
+let xs = Cons {
+    head = 42,
+    tail = Nil,
+}
 
 trace(xs)
 
-let s = "length = "
-String.append(s, Display[Int].format(length(xs)))
-trace(s)
+(function (Type) function (xs, ys)
+    let s = "length = "
+    String.>append(s, Display[Int].format(Type.>length(xs)))
+    trace(s)
 
-let ys = enum Cons struct
-    head = 42
-    tail = enum Nil
-end
-append(xs, ys)
-trace(xs)
+    Type.>append(xs, ys)
+    trace(xs)
+end)(LinkedInt)(Cons { head = 43, tail = Nil })

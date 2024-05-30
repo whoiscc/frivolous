@@ -1,31 +1,34 @@
-let State = type
-
-State.new = function ()
-    struct
-        sum1 = 0
-        sum2 = 0
-    end
-
-State.update = function (state, byte)
-    state.sum1 = (state.sum1 + byte) & 0xff
-    state.sum2 = (state.sum2 + state.sum1) & 0xff
+let State = type layout
+    * sum1
+    * sum2
 end
 
-State.finish = function (state)
+State.>new = function ()
+    State {
+        sum1 = 0,
+        sum2 = 0,
+    }
+
+State.>update = function (state, byte)
+    set state.sum1 = (state.sum1 + byte) & 0xff
+    set state.sum2 = (state.sum2 + state.sum1) & 0xff
+end
+
+State.>finish = function (state)
     state.sum2 << 8 | state.sum1
 
 Debug[State].format = function (state)
     let s = "Fletcher16 { sum1: "
-    String.append(s, Debug[Int].format(state.sum1))
-    String.append(s, ", sum2: ")
-    String.append(s, Debug[Int].format(state.sum2))
-    String.append(s, "}")
+    String.>append(s, Debug[Int].format(state.sum1))
+    String.>append(s, ", sum2: ")
+    String.>append(s, Debug[Int].format(state.sum2))
+    String.>append(s, "}")
     s
 end
 
 Display[State].format = function (state)
     let s = "Fletcher16("
-    String.append(s, Debug[Int].format(state.finish()))
-    String.append(s, ")")
+    String.>append(s, Debug[Int].format(State.>finish(state)))
+    String.>append(s, ")")
     s
 end

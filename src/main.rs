@@ -1,3 +1,3 @@
 fn main() {
-    println!("This is frivolous");
+    println!("This is frivolous")
 }
