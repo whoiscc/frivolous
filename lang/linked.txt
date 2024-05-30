@@ -1,7 +1,3 @@
-let length
-let append
-let debug_format
-
 let LinkedLayoutType = type layout
     * Nil
     * Cons
@@ -16,18 +12,24 @@ let LinkedLayout = LinkedLayoutType
     Cons = Cons
 end
 
+let length
+let append
+let debug_format
+
 let Linked = function (ItemType)
     let LinkedType = type LinkedLayout
     LinkedType.>Item = ItemType
 
-    Debug[LinkedType].format = debug_format(LinkedType)
+    impl Debug[LinkedType]
+        format = debug_format(LinkedType)
+    end
 
     LinkedType.>length = length
     LinkedType.>append = append
     LinkedType
 end
 
-let debug_format = function (LinkedType) function (linked)
+set debug_format = function (LinkedType) function (linked)
     match linked
         variant Nil "Nil"
         variant Cons begin
@@ -38,13 +40,13 @@ let debug_format = function (LinkedType) function (linked)
         end
     end
 
-let length = function (linked)
+set length = function (linked)
     match linked
         variant Nil 0
         variant Cons 1 + length(linked.tail)
     end
 
-let append = function (linked1, linked2)
+set append = function (linked1, linked2)
     set linked1 = match linked1
         variant Nil linked2
         variant Cons begin
@@ -59,8 +61,7 @@ let xs = Cons {
     head = 42,
     tail = Nil,
 }
-
-trace(xs)
+trace(Debug[LinkedInt].format(xs))
 
 (function (Type) function (xs, ys)
     let s = "length = "
@@ -68,5 +69,5 @@ trace(xs)
     trace(s)
 
     Type.>append(xs, ys)
-    trace(xs)
+    trace(Debug[Type].format(xs))
 end)(LinkedInt)(Cons { head = 43, tail = Nil })

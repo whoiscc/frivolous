@@ -1,0 +1,21 @@
+let Int = type builtin_NativeLayout
+
+impl Debug[Int]
+    format = function (int) builtin_int_debug_format(int)
+end
+
+impl Display[Int]
+    format = function (int) builtin_int_display_format(int)
+end
+
+let String = type builtin_NativeLayout
+
+impl Debug[String]
+    format = function (string) builtin_string_debug_format(string)
+end
+
+impl Display[String]
+    format = function (string) string
+end
+
+String.>append = function(string1, string2) builtin_string_append(string1, string2)

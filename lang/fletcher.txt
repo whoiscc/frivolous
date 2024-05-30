@@ -17,18 +17,22 @@ end
 State.>finish = function (state)
     state.sum2 << 8 | state.sum1
 
-Debug[State].format = function (state)
-    let s = "Fletcher16 { sum1: "
-    String.>append(s, Debug[Int].format(state.sum1))
-    String.>append(s, ", sum2: ")
-    String.>append(s, Debug[Int].format(state.sum2))
-    String.>append(s, "}")
-    s
+impl Debug[State].
+    format = function (state)
+        let s = "Fletcher16 { sum1: "
+        String.>append(s, Debug[Int].format(state.sum1))
+        String.>append(s, ", sum2: ")
+        String.>append(s, Debug[Int].format(state.sum2))
+        String.>append(s, "}")
+        s
+    end
 end
 
-Display[State].format = function (state)
-    let s = "Fletcher16("
-    String.>append(s, Debug[Int].format(State.>finish(state)))
-    String.>append(s, ")")
-    s
+impl Display[State]
+    format = function (state)
+        let s = "Fletcher16("
+        String.>append(s, Display[Int].format(State.>finish(state)))
+        String.>append(s, ")")
+        s
+    end
 end

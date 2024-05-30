@@ -1,9 +1,9 @@
 let fib
 set fib = function (n)
-    if n <= 1 begin
+    if n <= 2 begin
         1
     else
         fib(n - 1) + fib(n - 2)
     end
 
-trace(fib(10))
+trace(Display[Int].format(fib(10)))

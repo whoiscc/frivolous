@@ -1,0 +1,7 @@
+let Debug = trait
+    * format
+end
+
+let Display = trait
+    * format
+end
