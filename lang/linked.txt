@@ -1,23 +1,26 @@
-let LinkedLayoutType = type layout
-    * Nil
-    * Cons
-end
 let Nil = type layout
+
 let Cons = type layout
     * head
     * tail
 end
-let LinkedLayout = LinkedLayoutType
-    Nil = Nil
-    Cons = Cons
+
+let LinkedLayoutType = type layout
+    * Nil
+    * Cons
 end
+
+let linked_layout = LinkedLayoutType {    
+    Nil = Nil,
+    Cons = Cons,
+}
 
 let length
 let append
 let debug_format
 
 let Linked = function (ItemType)
-    let LinkedType = type LinkedLayout
+    let LinkedType = type linked_layout
     LinkedType.>Item = ItemType
 
     impl Debug[LinkedType]
@@ -31,8 +34,8 @@ end
 
 set debug_format = function (LinkedType) function (linked)
     match linked
-        variant Nil "Nil"
-        variant Cons begin
+        is Nil "Nil"
+        is Cons begin
             let s = Debug[LinkedType.>Item].format(linked.head)
             String.>append(s, " : ")
             String.>append(s, Debug[LinkedType].format(linked.tail))
@@ -42,14 +45,14 @@ set debug_format = function (LinkedType) function (linked)
 
 set length = function (linked)
     match linked
-        variant Nil 0
-        variant Cons 1 + length(linked.tail)
+        is Nil 0
+        is Cons 1 + length(linked.tail)
     end
 
 set append = function (linked1, linked2)
     set linked1 = match linked1
-        variant Nil linked2
-        variant Cons begin
+        is Nil linked2
+        is Cons begin
             append(linked1.tail, linked2)
             linked1
         end

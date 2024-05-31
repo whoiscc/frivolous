@@ -18,8 +18,8 @@ pub enum Instruction {
     LoadString(String),
     LoadCode(Box<Code>, Vec<StackOffset>),
     LoadLayout(Vec<String>),
-    LoadType(StackOffset), // of layout
-    LoadRecord(StackOffset, Vec<(String, StackOffset)>),
+    LoadType(Option<StackOffset>), // of layout, None for native types
+    LoadRecord(StackOffset, Vec<String>, Vec<(String, StackOffset)>),
     LoadTrait(Vec<String>),
 
     // copy current offset to the index, reset current offset to the index
@@ -28,8 +28,9 @@ pub enum Instruction {
     RecordGet(StackOffset, String),
     TypeGet(StackOffset, String),
     TraitGet(StackOffset, Vec<StackOffset>, String), // (trait, impl types, name)
-    Operator2(InstructionOperator2, StackOffset, StackOffset),
-    Match(StackOffset, StackOffset), // (matched, type)
+    IntOperator2(NumericalOperator2, StackOffset, StackOffset),
+    BitwiseOperator2(BitwiseOperator2, StackOffset, StackOffset),
+    Is(StackOffset, StackOffset),
 
     Set(StackOffset, StackOffset),
     RecordSet(StackOffset, String, StackOffset),
@@ -44,19 +45,23 @@ pub enum Instruction {
 }
 
 #[derive(Debug)]
-pub enum InstructionOperator2 {
+pub enum NumericalOperator2 {
     Add,
     Sub,
-    BitAnd,
-    BitOr,
-    ShiftLeft,
-    ShiftRight,
     Equal,
     NotEqual,
     Less,
     LessEqual,
     Greater,
     GreaterEqual,
+}
+
+#[derive(Debug)]
+pub enum BitwiseOperator2 {
+    And,
+    Or,
+    ShiftLeft,
+    ShiftRight,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +76,7 @@ pub struct Code {
 pub struct Machine {
     stack: Vec<Address>,
     frames: Vec<Frame>,
+    type_id_counter: TypeId,
 }
 
 #[derive(Debug)]
@@ -191,29 +197,58 @@ impl Machine {
                                 .collect();
                             self.stack.push(memory.allocate_any(code))
                         }
-                        LoadLayout(layout) => self
-                            .stack
-                            .push(memory.allocate_any(Box::new(RecordLayout(layout.clone())))),
+                        LoadLayout(layout) => self.stack.push(
+                            memory.allocate_any(Box::new(RecordLayout(layout.clone().into()))),
+                        ),
                         LoadType(layout_i) => {
+                            self.type_id_counter += 1;
                             let t = Type {
-                                layout: self.stack[frame.base_offset + *layout_i].clone(),
+                                id: self.type_id_counter,
+                                layout_address: layout_i
+                                    .map(|i| self.stack[frame.base_offset + i].clone()),
                                 attributes: Default::default(),
                             };
                             self.stack.push(memory.allocate_any(Box::new(t)))
                         }
-                        LoadRecord(type_i, fields) => {
-                            let Some(t) = self.stack[frame.base_offset + *type_i]
+                        LoadRecord(type_i, variants, fields) => {
+                            let Some(mut t) = self.stack[frame.base_offset + *type_i]
                                 .get_any_ref()?
                                 .downcast_ref::<Type>()
                             else {
                                 anyhow::bail!("expecting type object")
                             };
-                            let Some(RecordLayout(layout)) = t.layout.get_any_ref()?.downcast_ref()
+                            for variant in variants {
+                                let Some(layout_address) = &t.layout_address else {
+                                    anyhow::bail!("attempting to construct record for native type")
+                                };
+                                let Some(record) =
+                                    layout_address.get_any_ref()?.downcast_ref::<Record>()
+                                else {
+                                    anyhow::bail!(
+                                        "specifying variant while layout is not a record object"
+                                    )
+                                };
+                                let Some(p) = record.layout.iter().position(|name| name == variant)
+                                else {
+                                    anyhow::bail!("unexpected variant {variant}")
+                                };
+                                let Some(other_t) =
+                                    &record.addresses[p].get_any_ref()?.downcast_ref::<Type>()
+                                else {
+                                    anyhow::bail!("expecting type object")
+                                };
+                                t = other_t
+                            }
+                            let Some(layout_address) = &t.layout_address else {
+                                anyhow::bail!("attempting to construct record for native type")
+                            };
+                            let Some(RecordLayout(layout)) =
+                                layout_address.get_any_ref()?.downcast_ref()
                             else {
-                                anyhow::bail!("type layout is not a Layout object")
+                                anyhow::bail!("expecting layout object")
                             };
                             let mut addresses = Vec::new();
-                            for name in layout {
+                            for name in &**layout {
                                 let i = fields
                                     .iter()
                                     .find_map(
@@ -231,14 +266,15 @@ impl Machine {
                                 addresses.push(self.stack[frame.base_offset + i].clone())
                             }
                             let record = Record {
-                                layout: t.layout.clone(),
-                                addresses,
+                                type_id: t.id,
+                                layout: layout.clone(),
+                                addresses: addresses.into(),
                             };
                             self.stack.push(memory.allocate_any(Box::new(record)))
                         }
                         LoadTrait(layout) => {
                             let t = Trait {
-                                layout: layout.clone(),
+                                layout: layout.clone().into(),
                                 implementations: Default::default(),
                             };
                             self.stack.push(memory.allocate_any(Box::new(t)))
@@ -269,12 +305,8 @@ impl Machine {
                             else {
                                 anyhow::bail!("expecting record object")
                             };
-                            let Some(RecordLayout(layout)) =
-                                record.layout.get_any_ref()?.downcast_ref()
-                            else {
-                                anyhow::bail!("record layout is not a Layout object")
-                            };
-                            let p = layout
+                            let p = record
+                                .layout
                                 .iter()
                                 .position(|other_name| other_name == name)
                                 .ok_or(anyhow::format_err!("unexpected field name {name}"))?;
@@ -288,12 +320,8 @@ impl Machine {
                             else {
                                 anyhow::bail!("expecting record object")
                             };
-                            let Some(RecordLayout(layout)) =
-                                record.layout.get_any_ref()?.downcast_ref()
-                            else {
-                                anyhow::bail!("record layout is not a Layout object")
-                            };
-                            let p = layout
+                            let p = record
+                                .layout
                                 .iter()
                                 .position(|other_name| other_name == name)
                                 .ok_or(anyhow::format_err!("unexpected field name {name}"))?;
@@ -325,7 +353,123 @@ impl Machine {
                                 "duplicated setting attribute {name} on type object"
                             )
                         }
-                        _ => todo!(),
+                        TraitGet(i, implementor, name) => {
+                            let Some(t) = self.stack[frame.base_offset + *i]
+                                .get_any_ref()?
+                                .downcast_ref::<Trait>()
+                            else {
+                                anyhow::bail!("expecting Trait object")
+                            };
+                            let Some(p) = t.layout.iter().position(|other_name| other_name == name)
+                            else {
+                                anyhow::bail!("unexpected field name {name} on trait")
+                            };
+                            let mut k = Vec::new();
+                            for i in implementor {
+                                let Some(t) = self.stack[frame.base_offset + *i]
+                                    .get_any_ref()?
+                                    .downcast_ref::<Type>()
+                                else {
+                                    anyhow::bail!("trait dispatcher is not Type object")
+                                };
+                                k.push(t.id)
+                            }
+                            let Some(addresses) = t.implementations.get(&k) else {
+                                anyhow::bail!("no implementation for the dispatcher")
+                            };
+                            self.stack.push(addresses[p].clone())
+                        }
+                        Impl(i, implementor, fields) => {
+                            let Some(t) = self.stack[frame.base_offset + *i]
+                                .get_any_ref()?
+                                .downcast_ref::<Trait>()
+                            else {
+                                anyhow::bail!("expecting Trait object")
+                            };
+                            let mut k = Vec::new();
+                            for i in implementor {
+                                let Some(t) = self.stack[frame.base_offset + *i]
+                                    .get_any_ref()?
+                                    .downcast_ref::<Type>()
+                                else {
+                                    anyhow::bail!("trait dispatcher is not Type object")
+                                };
+                                k.push(t.id)
+                            }
+                            let mut addresses = Vec::new();
+                            for name in &*t.layout {
+                                let i = fields
+                                    .iter()
+                                    .find_map(
+                                        |(other_name, i)| {
+                                            if other_name == name {
+                                                Some(*i)
+                                            } else {
+                                                None
+                                            }
+                                        },
+                                    )
+                                    .ok_or(anyhow::format_err!(
+                                        "missing field {name} in record initialization"
+                                    ))?;
+                                addresses.push(self.stack[frame.base_offset + i].clone())
+                            }
+                            let replaced = self.stack[frame.base_offset + *i]
+                                .get_any_mut()?
+                                .downcast_mut::<Trait>()
+                                .unwrap()
+                                .implementations
+                                .insert(k, addresses);
+                            anyhow::ensure!(
+                                replaced.is_none(),
+                                "duplicated implementation of trait"
+                            )
+                        }
+
+                        Is(i, j) => {
+                            let Some(r) = self.stack[frame.base_offset + *j]
+                                .get_any_ref()?
+                                .downcast_ref::<Type>()
+                            else {
+                                anyhow::bail!("operator `is` expecting type object")
+                            };
+                            // TODO other types
+                            let Some(l) = self.stack[frame.base_offset + *i]
+                                .get_any_ref()?
+                                .downcast_ref::<Record>()
+                            else {
+                                anyhow::bail!("operator `is` expecting record object")
+                            };
+                            self.stack.push(memory.allocate_bool(l.type_id == r.id))
+                        }
+                        IntOperator2(op, i, j) => {
+                            let l = self.stack[frame.base_offset + *i].get_int()?;
+                            let r = self.stack[frame.base_offset + *j].get_int()?;
+                            use NumericalOperator2::*;
+                            let address = match op {
+                                Add => memory.allocate_int(l + r),
+                                Sub => memory.allocate_int(l + r),
+                                Equal => memory.allocate_bool(l == r),
+                                NotEqual => memory.allocate_bool(l != r),
+                                Less => memory.allocate_bool(l < r),
+                                LessEqual => memory.allocate_bool(l <= r),
+                                Greater => memory.allocate_bool(l > r),
+                                GreaterEqual => memory.allocate_bool(l >= r),
+                            };
+                            self.stack.push(address)
+                        }
+                        BitwiseOperator2(op, i, j) => {
+                            let l = self.stack[frame.base_offset + *i].get_int()?;
+                            let r = self.stack[frame.base_offset + *j].get_int()?;
+                            use crate::machine::BitwiseOperator2::*;
+                            let address = match op {
+                                And => memory.allocate_int(l & r),
+                                Or => memory.allocate_int(l | r),
+                                ShiftLeft => memory.allocate_int(l << r),
+                                ShiftRight => memory.allocate_int(l >> r),
+                            };
+                            self.stack.push(address)
+                        }
                     }
                 }
                 anyhow::bail!("Code instructions not end with Return")
@@ -336,21 +480,27 @@ impl Machine {
 
 #[derive(Debug)]
 struct Record {
-    layout: Address,
-    addresses: Vec<Address>,
+    type_id: TypeId,
+    // switching to `Arc<Vec<String>>` save 8 bytes, but incur one more indirection
+    // guess computation is more sensitive than memory here
+    layout: Arc<[String]>,
+    addresses: Box<[Address]>,
 }
 
 #[derive(Debug)]
-struct RecordLayout(Vec<String>);
+struct RecordLayout(Arc<[String]>);
+
+type TypeId = u32;
 
 #[derive(Debug)]
 struct Type {
-    layout: Address,
+    id: TypeId,
+    layout_address: Option<Address>,
     attributes: BTreeMap<String, Address>,
 }
 
 #[derive(Debug)]
 struct Trait {
-    layout: Vec<String>,
-    implementations: BTreeMap<Vec<Address>, Vec<Address>>,
+    layout: Arc<[String]>,
+    implementations: BTreeMap<Vec<TypeId>, Vec<Address>>,
 }

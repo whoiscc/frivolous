@@ -1,4 +1,4 @@
-let Int = type builtin_NativeLayout
+let Int = type native
 
 impl Debug[Int]
     format = function (int) builtin_int_debug_format(int)
@@ -8,7 +8,7 @@ impl Display[Int]
     format = function (int) builtin_int_display_format(int)
 end
 
-let String = type builtin_NativeLayout
+let String = type native
 
 impl Debug[String]
     format = function (string) builtin_string_debug_format(string)
