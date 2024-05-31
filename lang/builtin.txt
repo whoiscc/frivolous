@@ -1,4 +1,14 @@
-let Int = type native
+let Unit = builtin_unit_type()
+
+impl Debug[Unit]
+    format = function (unit) "Unit"
+end
+
+impl Display[Unit]
+    format = function (unit) "Unit"
+end
+
+let Int = builtin_int_type()
 
 impl Debug[Int]
     format = function (int) builtin_int_debug_format(int)

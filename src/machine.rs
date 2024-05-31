@@ -108,7 +108,7 @@ impl Machine {
         code_address: Address,
         arguments: Vec<Address>,
     ) -> anyhow::Result<()> {
-        let Some(code) = code_address.get_any_ref()?.downcast_ref::<Code>() else {
+        let Some(code) = unsafe { code_address.get_any_ref() }?.downcast_ref::<Code>() else {
             anyhow::bail!("expecting Code object")
         };
         anyhow::ensure!(code.num_parameter == arguments.len());
@@ -131,9 +131,7 @@ impl Machine {
                 .frames
                 .last_mut()
                 .ok_or(anyhow::format_err!("evaluating frame is missing"))?;
-            let code = frame
-                .code_address
-                .get_any_ref()?
+            let code = unsafe { frame.code_address.get_any_ref() }?
                 .downcast_ref::<Code>()
                 .ok_or(anyhow::format_err!("expecting Code object"))?;
             'local_jump: loop {
@@ -146,7 +144,7 @@ impl Machine {
                             continue 'local_jump;
                         }
                         JumpIf(i, offset) => {
-                            if self.stack[frame.base_offset + *i].get_bool()? {
+                            if unsafe { self.stack[frame.base_offset + *i].get_bool() }? {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
@@ -211,31 +209,31 @@ impl Machine {
                             self.stack.push(memory.allocate_any(Box::new(t)))
                         }
                         LoadRecord(type_i, variants, fields) => {
-                            let Some(mut t) = self.stack[frame.base_offset + *type_i]
-                                .get_any_ref()?
-                                .downcast_ref::<Type>()
+                            let Some(mut t) =
+                                unsafe { self.stack[frame.base_offset + *type_i].get_any_ref() }?
+                                    .downcast_ref::<Type>()
                             else {
-                                anyhow::bail!("expecting type object")
+                                anyhow::bail!("expecting Type object")
                             };
                             for variant in variants {
                                 let Some(layout_address) = &t.layout_address else {
                                     anyhow::bail!("attempting to construct record for native type")
                                 };
-                                let Some(record) =
-                                    layout_address.get_any_ref()?.downcast_ref::<Record>()
+                                let Some(record) = unsafe { layout_address.get_any_ref() }?
+                                    .downcast_ref::<Record>()
                                 else {
                                     anyhow::bail!(
-                                        "specifying variant while layout is not a record object"
+                                        "specifying variant while layout is not a Record object"
                                     )
                                 };
                                 let Some(p) = record.layout.iter().position(|name| name == variant)
                                 else {
                                     anyhow::bail!("unexpected variant {variant}")
                                 };
-                                let Some(other_t) =
-                                    &record.addresses[p].get_any_ref()?.downcast_ref::<Type>()
+                                let Some(other_t) = unsafe { record.addresses[p].get_any_ref() }?
+                                    .downcast_ref::<Type>()
                                 else {
-                                    anyhow::bail!("expecting type object")
+                                    anyhow::bail!("expecting Type object on variant {variant}")
                                 };
                                 t = other_t
                             }
@@ -243,9 +241,9 @@ impl Machine {
                                 anyhow::bail!("attempting to construct record for native type")
                             };
                             let Some(RecordLayout(layout)) =
-                                layout_address.get_any_ref()?.downcast_ref()
+                                unsafe { layout_address.get_any_ref() }?.downcast_ref()
                             else {
-                                anyhow::bail!("expecting layout object")
+                                anyhow::bail!("expecting Layout object")
                             };
                             let mut addresses = Vec::new();
                             for name in &**layout {
@@ -284,26 +282,30 @@ impl Machine {
                             match i.cmp(source_i) {
                                 Less => {
                                     let (stack, remaining_stack) = self.stack.split_at_mut(*i + 1);
-                                    stack
-                                        .last_mut()
-                                        .unwrap()
-                                        .copy_from(&remaining_stack[source_i - i - 1])?
+                                    unsafe {
+                                        stack
+                                            .last_mut()
+                                            .unwrap()
+                                            .copy_from(&remaining_stack[source_i - i - 1])
+                                    }
                                 }
                                 Greater => {
                                     let (stack, remaining_stack) =
                                         self.stack.split_at_mut(*source_i + 1);
-                                    remaining_stack[i - source_i - 1]
-                                        .copy_from(stack.last().unwrap())?
+                                    unsafe {
+                                        remaining_stack[i - source_i - 1]
+                                            .copy_from(stack.last().unwrap())
+                                    }
                                 }
                                 _ => {} // would be some silly case like `set x = x`
                             }
                         }
                         RecordGet(i, name) => {
-                            let Some(record) = self.stack[frame.base_offset + *i]
-                                .get_any_ref()?
-                                .downcast_ref::<Record>()
+                            let Some(record) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_ref() }?
+                                    .downcast_ref::<Record>()
                             else {
-                                anyhow::bail!("expecting record object")
+                                anyhow::bail!("expecting Record object")
                             };
                             let p = record
                                 .layout
@@ -314,11 +316,11 @@ impl Machine {
                         }
                         RecordSet(i, name, j) => {
                             let address = self.stack[frame.base_offset + *j].clone();
-                            let Some(record) = self.stack[frame.base_offset + *i]
-                                .get_any_mut()?
-                                .downcast_mut::<Record>()
+                            let Some(record) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_mut() }?
+                                    .downcast_mut::<Record>()
                             else {
-                                anyhow::bail!("expecting record object")
+                                anyhow::bail!("expecting Record object")
                             };
                             let p = record
                                 .layout
@@ -328,11 +330,11 @@ impl Machine {
                             record.addresses[p] = address
                         }
                         TypeGet(i, name) => {
-                            let Some(t) = self.stack[frame.base_offset + *i]
-                                .get_any_ref()?
-                                .downcast_ref::<Type>()
+                            let Some(t) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_ref() }?
+                                    .downcast_ref::<Type>()
                             else {
-                                anyhow::bail!("expecting type object")
+                                anyhow::bail!("expecting Type object")
                             };
                             let Some(address) = t.attributes.get(name) else {
                                 anyhow::bail!("there is no attribute {name} on type object")
@@ -341,22 +343,22 @@ impl Machine {
                         }
                         TypeSet(i, name, j) => {
                             let address = self.stack[frame.base_offset + *j].clone();
-                            let Some(t) = self.stack[frame.base_offset + *i]
-                                .get_any_mut()?
-                                .downcast_mut::<Type>()
+                            let Some(t) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_mut() }?
+                                    .downcast_mut::<Type>()
                             else {
-                                anyhow::bail!("expecting type object")
+                                anyhow::bail!("expecting Type object")
                             };
                             let replaced = t.attributes.insert(name.clone(), address);
                             anyhow::ensure!(
                                 replaced.is_none(),
-                                "duplicated setting attribute {name} on type object"
+                                "duplicated setting attribute {name} on Type object"
                             )
                         }
                         TraitGet(i, implementor, name) => {
-                            let Some(t) = self.stack[frame.base_offset + *i]
-                                .get_any_ref()?
-                                .downcast_ref::<Trait>()
+                            let Some(t) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_ref() }?
+                                    .downcast_ref::<Trait>()
                             else {
                                 anyhow::bail!("expecting Trait object")
                             };
@@ -366,11 +368,11 @@ impl Machine {
                             };
                             let mut k = Vec::new();
                             for i in implementor {
-                                let Some(t) = self.stack[frame.base_offset + *i]
-                                    .get_any_ref()?
-                                    .downcast_ref::<Type>()
+                                let Some(t) =
+                                    unsafe { self.stack[frame.base_offset + *i].get_any_ref() }?
+                                        .downcast_ref::<Type>()
                                 else {
-                                    anyhow::bail!("trait dispatcher is not Type object")
+                                    anyhow::bail!("trait implementor is not Type object")
                                 };
                                 k.push(t.id)
                             }
@@ -380,19 +382,19 @@ impl Machine {
                             self.stack.push(addresses[p].clone())
                         }
                         Impl(i, implementor, fields) => {
-                            let Some(t) = self.stack[frame.base_offset + *i]
-                                .get_any_ref()?
-                                .downcast_ref::<Trait>()
+                            let Some(t) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_ref() }?
+                                    .downcast_ref::<Trait>()
                             else {
                                 anyhow::bail!("expecting Trait object")
                             };
                             let mut k = Vec::new();
                             for i in implementor {
-                                let Some(t) = self.stack[frame.base_offset + *i]
-                                    .get_any_ref()?
-                                    .downcast_ref::<Type>()
+                                let Some(t) =
+                                    unsafe { self.stack[frame.base_offset + *i].get_any_ref()? }
+                                        .downcast_ref::<Type>()
                                 else {
-                                    anyhow::bail!("trait dispatcher is not Type object")
+                                    anyhow::bail!("trait implementor is not Type object")
                                 };
                                 k.push(t.id)
                             }
@@ -414,12 +416,13 @@ impl Machine {
                                     ))?;
                                 addresses.push(self.stack[frame.base_offset + i].clone())
                             }
-                            let replaced = self.stack[frame.base_offset + *i]
-                                .get_any_mut()?
-                                .downcast_mut::<Trait>()
-                                .unwrap()
-                                .implementations
-                                .insert(k, addresses);
+                            let replaced =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_mut() }
+                                    .unwrap()
+                                    .downcast_mut::<Trait>()
+                                    .unwrap()
+                                    .implementations
+                                    .insert(k, addresses);
                             anyhow::ensure!(
                                 replaced.is_none(),
                                 "duplicated implementation of trait"
@@ -427,24 +430,26 @@ impl Machine {
                         }
 
                         Is(i, j) => {
-                            let Some(r) = self.stack[frame.base_offset + *j]
-                                .get_any_ref()?
-                                .downcast_ref::<Type>()
+                            let Some(r) =
+                                unsafe { self.stack[frame.base_offset + *j].get_any_ref() }?
+                                    .downcast_ref::<Type>()
                             else {
-                                anyhow::bail!("operator `is` expecting type object")
+                                anyhow::bail!("operator `is` expects Type object")
                             };
                             // TODO other types
-                            let Some(l) = self.stack[frame.base_offset + *i]
-                                .get_any_ref()?
-                                .downcast_ref::<Record>()
+                            let Some(l) =
+                                unsafe { self.stack[frame.base_offset + *i].get_any_ref() }?
+                                    .downcast_ref::<Record>()
                             else {
-                                anyhow::bail!("operator `is` expecting record object")
+                                anyhow::bail!(
+                                    "operator `is` has only been supporting Record object"
+                                )
                             };
                             self.stack.push(memory.allocate_bool(l.type_id == r.id))
                         }
                         IntOperator2(op, i, j) => {
-                            let l = self.stack[frame.base_offset + *i].get_int()?;
-                            let r = self.stack[frame.base_offset + *j].get_int()?;
+                            let l = unsafe { self.stack[frame.base_offset + *i].get_int() }?;
+                            let r = unsafe { self.stack[frame.base_offset + *j].get_int() }?;
                             use NumericalOperator2::*;
                             let address = match op {
                                 Add => memory.allocate_int(l + r),
@@ -459,8 +464,8 @@ impl Machine {
                             self.stack.push(address)
                         }
                         BitwiseOperator2(op, i, j) => {
-                            let l = self.stack[frame.base_offset + *i].get_int()?;
-                            let r = self.stack[frame.base_offset + *j].get_int()?;
+                            let l = unsafe { self.stack[frame.base_offset + *i].get_int() }?;
+                            let r = unsafe { self.stack[frame.base_offset + *j].get_int() }?;
                             use crate::machine::BitwiseOperator2::*;
                             let address = match op {
                                 And => memory.allocate_int(l & r),
