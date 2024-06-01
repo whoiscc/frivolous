@@ -1,4 +1,7 @@
-use std::{any::Any, sync::Arc};
+use std::{
+    any::{type_name, Any},
+    sync::Arc,
+};
 
 // not impl Copy and Default intentionally
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -65,6 +68,12 @@ impl Memory {
     }
 }
 
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub struct TypeError {
+    pub expected: &'static str,
+    //
+}
+
 #[allow(clippy::missing_safety_doc)]
 impl Address {
     unsafe fn content_ref(&self) -> &BlockContent {
@@ -81,28 +90,30 @@ impl Address {
 
     pub unsafe fn get_unit(&self) -> anyhow::Result<()> {
         let BlockContent::Unit = (unsafe { self.content_ref() }) else {
-            anyhow::bail!("expecting Unit object")
+            anyhow::bail!(TypeError { expected: "Unit" })
         };
         Ok(())
     }
 
     pub unsafe fn get_bool(&self) -> anyhow::Result<bool> {
         let BlockContent::Bool(b) = (unsafe { self.content_ref() }) else {
-            anyhow::bail!("expecting Bool object")
+            anyhow::bail!(TypeError { expected: "Bool" })
         };
         Ok(*b)
     }
 
     pub unsafe fn get_int(&self) -> anyhow::Result<i32> {
         let BlockContent::Int(int) = (unsafe { self.content_ref() }) else {
-            anyhow::bail!("expecting Int object")
+            anyhow::bail!(TypeError { expected: "Int" })
         };
         Ok(*int)
     }
 
     pub unsafe fn get_any_ref(&self) -> anyhow::Result<&dyn Any> {
         let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
-            anyhow::bail!("expecting dynamical typed object")
+            anyhow::bail!(TypeError {
+                expected: "(dynamical typed)"
+            })
         };
         any.get_ref()
     }
@@ -110,9 +121,33 @@ impl Address {
     // need to rethink about mutability rules
     pub unsafe fn get_any_mut(&mut self) -> anyhow::Result<&mut dyn Any> {
         let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
-            anyhow::bail!("expecting dynamical typed object")
+            anyhow::bail!(TypeError {
+                expected: "(dynamical typed)"
+            })
         };
         any.get_mut()
+    }
+
+    pub unsafe fn get_downcast_ref<T: 'static>(&self) -> anyhow::Result<&T> {
+        match self.get_any_ref().map(|any| any.downcast_ref()) {
+            Ok(Some(any)) => Ok(any),
+            Err(err) if !err.is::<TypeError>() => Err(err),
+            _ => Err(TypeError {
+                expected: type_name::<T>(),
+            }
+            .into()),
+        }
+    }
+
+    pub unsafe fn get_downcast_mut<T: 'static>(&mut self) -> anyhow::Result<&mut T> {
+        match self.get_any_mut().map(|any| any.downcast_mut()) {
+            Ok(Some(any)) => Ok(any),
+            Err(err) if !err.is::<TypeError>() => Err(err),
+            _ => Err(TypeError {
+                expected: type_name::<T>(),
+            }
+            .into()),
+        }
     }
 }
 
