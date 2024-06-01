@@ -1,8 +1,12 @@
 use std::{
     cmp::Ordering::{Greater, Less},
     collections::BTreeMap,
+    fmt::Display,
     sync::Arc,
 };
+
+use anyhow::Context;
+use derive_more::Deref;
 
 use crate::memory::{Address, Memory};
 
@@ -100,7 +104,7 @@ impl Machine {
         anyhow::ensure!(self.stack.is_empty());
         anyhow::ensure!(self.frames.is_empty());
         self.push_frame(code_address, Vec::new())?;
-        self.evaluate(memory)
+        self.evaluate_with_backtrace(memory)
     }
 
     fn push_frame(&mut self, code_address: Address, arguments: Vec<Address>) -> anyhow::Result<()> {
@@ -119,6 +123,59 @@ impl Machine {
         self.stack.extend(captures.clone());
         self.stack.extend(arguments);
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct BacktraceLine {
+    pub code_hints: String,
+    pub instruction_offset: usize,
+}
+
+impl Display for BacktraceLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` (instruction {})",
+            self.code_hints, self.instruction_offset
+        )
+    }
+}
+
+impl Frame {
+    unsafe fn backtrace_line(&self) -> BacktraceLine {
+        let code = unsafe { self.code_address.get_downcast_ref::<Code>() }.unwrap();
+        BacktraceLine {
+            code_hints: code.hints.clone(),
+            instruction_offset: self.instruction_offset,
+        }
+    }
+}
+
+#[derive(Debug, Deref)]
+pub struct Backtrace(pub Vec<BacktraceLine>);
+
+impl Display for Backtrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut prefix = "";
+        for line in &**self {
+            write!(f, "{prefix}{line}")?;
+            prefix = "\n"
+        }
+        Ok(())
+    }
+}
+
+impl Machine {
+    fn evaluate_with_backtrace(&mut self, memory: &mut Memory) -> anyhow::Result<()> {
+        self.evaluate(memory).with_context(|| {
+            Backtrace(
+                self.frames
+                    .iter()
+                    .map(|frame| unsafe { frame.backtrace_line() })
+                    .collect(),
+            )
+        })
     }
 
     fn evaluate(&mut self, memory: &mut Memory) -> anyhow::Result<()> {
