@@ -119,9 +119,7 @@ impl Machine {
     }
 
     fn push_frame(&mut self, code_address: Address, arguments: Vec<Address>) -> anyhow::Result<()> {
-        let Some(code) = unsafe { code_address.get_any_ref() }?.downcast_ref::<Code>() else {
-            anyhow::bail!("expecting Code object")
-        };
+        let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
         anyhow::ensure!(code.num_parameter == arguments.len());
         let captures = code.captures.clone();
         let frame = Frame {
@@ -247,8 +245,8 @@ impl Machine {
                                 self.stack.push(address);
                                 continue 'nonlocal_jump;
                             } else {
-                                self.stack[0] = address;
-                                self.stack.truncate(1);
+                                unsafe { address.get_unit() }?;
+                                self.stack.clear();
                                 return Ok(());
                             };
                         }

@@ -111,6 +111,7 @@ impl Address {
 
     pub unsafe fn get_any_ref(&self) -> anyhow::Result<&dyn Any> {
         let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
+            tracing::warn!("block content not Any");
             anyhow::bail!(TypeError {
                 expected: "(dynamical typed)"
             })
@@ -121,6 +122,7 @@ impl Address {
     // need to rethink about mutability rules
     pub unsafe fn get_any_mut(&self) -> anyhow::Result<&mut dyn Any> {
         let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
+            tracing::warn!("block content not Any");
             anyhow::bail!(TypeError {
                 expected: "(dynamical typed)"
             })
@@ -159,7 +161,7 @@ impl BlockContentAny {
     }
 
     fn get_ref(&self) -> anyhow::Result<&dyn Any> {
-        Ok(&self.data)
+        Ok(unsafe { &*self.data })
     }
 
     fn get_mut(&self) -> anyhow::Result<&mut dyn Any> {

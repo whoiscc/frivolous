@@ -29,3 +29,5 @@ impl Display[String]
 end
 
 String.>append = intrinsic string_append
+
+let trace = intrinsic trace

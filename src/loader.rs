@@ -38,6 +38,12 @@ mod builtin {
         string1.push_str(string2);
         Ok(memory.allocate_unit())
     }
+
+    pub unsafe fn trace(args: &[Address], memory: &mut Memory) -> anyhow::Result<Address> {
+        let string = unsafe { args[0].get_downcast_ref::<String>() }?;
+        tracing::info!("{string}");
+        Ok(memory.allocate_unit())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +78,7 @@ impl Loader {
         self.load_builtin_code(memory, "int_debug_format", 1, int_debug_format);
         self.load_builtin_code(memory, "int_display_format", 1, int_display_format);
         self.load_builtin_code(memory, "string_debug_format", 1, string_debug_format);
-        self.load_builtin_code(memory, "string_append", 1, string_append)
+        self.load_builtin_code(memory, "string_append", 2, string_append);
+        self.load_builtin_code(memory, "trace", 1, trace);
     }
 }
