@@ -8,7 +8,10 @@ use std::{
 use anyhow::Context;
 use derive_more::Deref;
 
-use crate::memory::{Address, Memory};
+use crate::{
+    loader::Loader,
+    memory::{Address, Memory},
+};
 
 pub type CodeId = usize;
 pub type StackOffset = usize;
@@ -25,6 +28,7 @@ pub enum Instruction {
     LoadType(Option<StackOffset>), // of layout, None for native types
     LoadRecord(StackOffset, Vec<String>, Vec<(String, StackOffset)>),
     LoadTrait(Vec<String>),
+    LoadIntrinsic(String),
 
     // copy current offset to the index, reset current offset to the index
     Rewind(StackOffset),
@@ -73,7 +77,13 @@ pub struct Code {
     pub hints: String,
     pub captures: Vec<Address>,
     pub num_parameter: usize,
-    pub instructions: Arc<[Instruction]>,
+    pub executable: CodeExecutable,
+}
+
+#[derive(Debug, Clone)]
+pub enum CodeExecutable {
+    Interpreted(Arc<[Instruction]>),
+    Native(unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>),
 }
 
 #[derive(Debug, Default)]
@@ -100,11 +110,12 @@ impl Machine {
         &mut self,
         code_address: Address,
         memory: &mut Memory,
+        loader: &Loader,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(self.stack.is_empty());
         anyhow::ensure!(self.frames.is_empty());
         self.push_frame(code_address, Vec::new())?;
-        self.evaluate_with_backtrace(memory)
+        self.evaluate_with_backtrace(memory, loader)
     }
 
     fn push_frame(&mut self, code_address: Address, arguments: Vec<Address>) -> anyhow::Result<()> {
@@ -167,8 +178,12 @@ impl Display for Backtrace {
 }
 
 impl Machine {
-    fn evaluate_with_backtrace(&mut self, memory: &mut Memory) -> anyhow::Result<()> {
-        self.evaluate(memory).with_context(|| {
+    fn evaluate_with_backtrace(
+        &mut self,
+        memory: &mut Memory,
+        loader: &Loader,
+    ) -> anyhow::Result<()> {
+        self.evaluate(memory, loader).with_context(|| {
             Backtrace(
                 self.frames
                     .iter()
@@ -178,14 +193,18 @@ impl Machine {
         })
     }
 
-    fn evaluate(&mut self, memory: &mut Memory) -> anyhow::Result<()> {
+    fn evaluate(&mut self, memory: &mut Memory, loader: &Loader) -> anyhow::Result<()> {
         'nonlocal_jump: loop {
             let Some(frame) = self.frames.last_mut() else {
                 anyhow::bail!("evaluating frame is missing")
             };
-            let code = unsafe { frame.code_address.get_downcast_ref::<Code>() }?;
+            let CodeExecutable::Interpreted(instructions) =
+                &unsafe { frame.code_address.get_downcast_ref::<Code>() }?.executable
+            else {
+                todo!()
+            };
             'local_jump: loop {
-                for instruction in &code.instructions[frame.instruction_offset..] {
+                for instruction in &instructions[frame.instruction_offset..] {
                     frame.instruction_offset += 1;
                     use Instruction::*;
                     match instruction {
@@ -204,10 +223,21 @@ impl Machine {
                             let arguments = args_i
                                 .iter()
                                 .map(|i| self.stack[frame.base_offset + *i].clone())
-                                .collect();
-                            frame.return_offset = self.stack.len();
-                            self.push_frame(code_address, arguments)?;
-                            continue 'nonlocal_jump;
+                                .collect::<Vec<_>>();
+                            // i don't like every interpreted call must be downcast three times (one
+                            // here, one in `push_frame`, one after nonlocal jump)
+                            // hopefully compiler will optimize them away
+                            let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
+                            if let CodeExecutable::Native(function) = code.executable {
+                                anyhow::ensure!(code.captures.is_empty());
+                                anyhow::ensure!(arguments.len() == code.num_parameter);
+                                let address = unsafe { function(&arguments, memory) }?;
+                                self.stack.push(address)
+                            } else {
+                                frame.return_offset = self.stack.len();
+                                self.push_frame(code_address, arguments)?;
+                                continue 'nonlocal_jump;
+                            }
                         }
                         Return(i) => {
                             let address = self.stack.remove(frame.base_offset + *i);
@@ -310,6 +340,12 @@ impl Machine {
                                 implementations: Default::default(),
                             };
                             self.stack.push(memory.allocate_any(Box::new(t)))
+                        }
+                        LoadIntrinsic(key) => {
+                            let Some(address) = loader.intrinsics.get(key) else {
+                                anyhow::bail!("intrinsic {key} not found")
+                            };
+                            self.stack.push(address.clone())
                         }
 
                         Set(i, source_i) => {

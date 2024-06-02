@@ -1,3 +1,4 @@
+pub mod loader;
 pub mod machine;
 pub mod memory;
 

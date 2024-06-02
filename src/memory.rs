@@ -119,7 +119,7 @@ impl Address {
     }
 
     // need to rethink about mutability rules
-    pub unsafe fn get_any_mut(&mut self) -> anyhow::Result<&mut dyn Any> {
+    pub unsafe fn get_any_mut(&self) -> anyhow::Result<&mut dyn Any> {
         let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
             anyhow::bail!(TypeError {
                 expected: "(dynamical typed)"
@@ -139,7 +139,7 @@ impl Address {
         }
     }
 
-    pub unsafe fn get_downcast_mut<T: 'static>(&mut self) -> anyhow::Result<&mut T> {
+    pub unsafe fn get_downcast_mut<T: 'static>(&self) -> anyhow::Result<&mut T> {
         match self.get_any_mut().map(|any| any.downcast_mut()) {
             Ok(Some(any)) => Ok(any),
             Err(err) if !err.is::<TypeError>() => Err(err),

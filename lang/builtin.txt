@@ -1,4 +1,4 @@
-let Unit = builtin_unit_type()
+let Unit = intrinsic unit_type
 
 impl Debug[Unit]
     format = function (unit) "Unit"
@@ -8,24 +8,24 @@ impl Display[Unit]
     format = function (unit) "Unit"
 end
 
-let Int = builtin_int_type()
+let Int = intrinsic int_type
 
 impl Debug[Int]
-    format = function (int) builtin_int_debug_format(int)
+    format = intrinsic int_debug_format
 end
 
 impl Display[Int]
-    format = function (int) builtin_int_display_format(int)
+    format = intrinsic int_display_format
 end
 
 let String = type native
 
 impl Debug[String]
-    format = function (string) builtin_string_debug_format(string)
+    format = intrinsic string_debug_format
 end
 
 impl Display[String]
     format = function (string) string
 end
 
-String.>append = function(string1, string2) builtin_string_append(string1, string2)
+String.>append = intrinsic string_append
