@@ -203,6 +203,7 @@ impl Machine {
             };
             'local_jump: loop {
                 for instruction in &instructions[frame.instruction_offset..] {
+                    tracing::debug!("{instruction:?}");
                     frame.instruction_offset += 1;
                     use Instruction::*;
                     match instruction {
@@ -475,10 +476,11 @@ impl Machine {
                         IntOperator2(op, i, j) => {
                             let l = unsafe { self.stack[frame.base_offset + *i].get_int() }?;
                             let r = unsafe { self.stack[frame.base_offset + *j].get_int() }?;
+                            tracing::debug!("  {op:?} {l} {r}");
                             use NumericalOperator2::*;
                             let address = match op {
                                 Add => memory.allocate_int(l + r),
-                                Sub => memory.allocate_int(l + r),
+                                Sub => memory.allocate_int(l - r),
                                 Equal => memory.allocate_bool(l == r),
                                 NotEqual => memory.allocate_bool(l != r),
                                 Less => memory.allocate_bool(l < r),

@@ -6,6 +6,10 @@ use loader::Loader;
 use machine::{Code, CodeExecutable::Interpreted, Machine};
 use memory::Memory;
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     use machine::{Instruction::*, NumericalOperator2::*};
@@ -39,9 +43,12 @@ fn main() -> anyhow::Result<()> {
         LoadUnit,
         LoadCode(Box::new(fib), vec![0]),
         Set(0, 1),
-        LoadUnit,
+        LoadIntrinsic("trace".into()),
+        LoadString("start".into()),
+        Call(2, vec![3]),
         Rewind(1),
-        LoadInt(10),
+        // LoadInt(10),
+        LoadInt(32),
         Call(0, vec![2]),
         Rewind(0),
         LoadIntrinsic("int_display_format".into()),
