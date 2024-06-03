@@ -46,7 +46,7 @@ pub enum Instruction {
     Impl(StackOffset, Vec<StackOffset>, Vec<(String, StackOffset)>),
 
     Jump(InstructionOffset),
-    JumpIf(StackOffset, InstructionOffset),
+    JumpUnless(StackOffset, InstructionOffset),
 
     Call(StackOffset, Vec<StackOffset>),
     Return(StackOffset),
@@ -210,8 +210,8 @@ impl Machine {
                             frame.instruction_offset = *offset;
                             continue 'local_jump;
                         }
-                        JumpIf(i, offset) => {
-                            if unsafe { self.stack[frame.base_offset + *i].get_bool() }? {
+                        JumpUnless(i, offset) => {
+                            if !unsafe { self.stack[frame.base_offset + *i].get_bool() }? {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
@@ -252,7 +252,7 @@ impl Machine {
                         }
 
                         Rewind(i) => {
-                            anyhow::ensure!(self.stack.len() > frame.base_offset + *i);
+                            anyhow::ensure!(self.stack.len() >= frame.base_offset + *i);
                             let address = self.stack.pop().unwrap();
                             // `splice` probably can do but less readable
                             self.stack.truncate(frame.base_offset + *i);

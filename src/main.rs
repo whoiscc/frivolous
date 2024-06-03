@@ -8,12 +8,49 @@ use memory::Memory;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    use machine::Instruction::*;
+    use machine::{Instruction::*, NumericalOperator2::*};
     let instructions = [
+        // 0 captured self reference, 1 argument
+        LoadInt(2),
+        IntOperator2(LessEqual, 1, 2),
+        Rewind(2),
+        JumpUnless(2, 6),
+        LoadInt(1),
+        Return(3),
+        // jump to here
+        LoadInt(1),
+        IntOperator2(Sub, 1, 3),
+        Call(0, vec![4]),
+        Rewind(3),
+        LoadInt(2),
+        IntOperator2(Sub, 1, 4),
+        Call(0, vec![5]),
+        Rewind(4),
+        IntOperator2(Add, 3, 4),
+        Return(5),
+    ];
+    let fib = Code {
+        hints: "fib".into(),
+        captures: Default::default(),
+        num_parameter: 1,
+        executable: Interpreted(instructions.into()),
+    };
+    let instructions = [
+        LoadUnit,
+        LoadCode(Box::new(fib), vec![0]),
+        Set(0, 1),
+        LoadUnit,
+        Rewind(1),
+        LoadInt(10),
+        Call(0, vec![2]),
+        Rewind(0),
+        LoadIntrinsic("int_display_format".into()),
+        Call(1, vec![0]),
+        Rewind(0),
         LoadIntrinsic("trace".into()),
-        LoadString("This is frivolous".into()),
-        Call(0, vec![1]),
-        Return(2),
+        Call(1, vec![0]),
+        Rewind(0),
+        Return(0),
     ];
     let code = Code {
         hints: "<main>".into(),
