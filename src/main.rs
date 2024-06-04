@@ -3,7 +3,7 @@ pub mod machine;
 pub mod memory;
 
 use loader::Loader;
-use machine::{Code, CodeExecutable::Interpreted, Machine};
+use machine::{Code, CodeSource::Interpreted, Machine};
 use memory::Memory;
 
 #[cfg(not(target_env = "msvc"))]
@@ -35,15 +35,16 @@ fn main() -> anyhow::Result<()> {
     ];
     let fib = Code {
         hints: "fib".into(),
-        captures: Default::default(),
+        num_capture: 1,
         num_parameter: 1,
-        executable: Interpreted(instructions.into()),
+        source: Interpreted(instructions.into()),
+        captures: Default::default(),
     };
     let instructions = [
         LoadUnit,
         LoadCode(Box::new(fib), vec![0]),
         Set(0, 1),
-        LoadIntrinsic("trace".into()),
+        LoadInjection("trace".into()),
         LoadString("start".into()),
         Call(2, vec![3]),
         Rewind(1),
@@ -51,19 +52,20 @@ fn main() -> anyhow::Result<()> {
         LoadInt(32),
         Call(0, vec![2]),
         Rewind(0),
-        LoadIntrinsic("int_display_format".into()),
+        LoadInjection("int_display_format".into()),
         Call(1, vec![0]),
         Rewind(0),
-        LoadIntrinsic("trace".into()),
+        LoadInjection("trace".into()),
         Call(1, vec![0]),
         Rewind(0),
         Return(0),
     ];
     let code = Code {
         hints: "<main>".into(),
-        captures: Default::default(),
+        num_capture: 0,
         num_parameter: 0,
-        executable: Interpreted(instructions.into()),
+        source: Interpreted(instructions.into()),
+        captures: Default::default(),
     };
     let mut memory = Memory::new();
     let mut loader = Loader::new();

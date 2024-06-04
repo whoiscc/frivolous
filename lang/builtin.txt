@@ -1,4 +1,4 @@
-let Unit = intrinsic unit_type
+let Unit = inject unit_type
 
 impl Debug[Unit]
     format = function (unit) "Unit"
@@ -8,26 +8,26 @@ impl Display[Unit]
     format = function (unit) "Unit"
 end
 
-let Int = intrinsic int_type
+let Int = inject int_type
 
 impl Debug[Int]
-    format = intrinsic int_debug_format
+    format = inject int_debug_format
 end
 
 impl Display[Int]
-    format = intrinsic int_display_format
+    format = inject int_display_format
 end
 
 let String = type native
 
 impl Debug[String]
-    format = intrinsic string_debug_format
+    format = inject string_debug_format
 end
 
 impl Display[String]
     format = function (string) string
 end
 
-String.>append = intrinsic string_append
+String.>append = inject string_append
 
-let trace = intrinsic trace
+let trace = inject trace

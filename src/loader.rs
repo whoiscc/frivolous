@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    machine::{Code, CodeExecutable::Native},
+    machine::{Code, CodeSource::Native},
     memory::{Address, Memory},
 };
 
@@ -48,7 +48,7 @@ mod builtin {
 
 #[derive(Debug, Default)]
 pub struct Loader {
-    pub intrinsics: BTreeMap<String, Address>,
+    pub injections: BTreeMap<String, Address>,
 }
 
 impl Loader {
@@ -65,11 +65,12 @@ impl Loader {
     ) {
         let address = memory.allocate_any(Box::new(Code {
             hints: format!("<builtin {key}>"),
-            captures: Default::default(),
+            num_capture: 0,
             num_parameter,
-            executable: Native(function),
+            source: Native(function),
+            captures: Default::default(),
         }));
-        let replaced = self.intrinsics.insert(key.into(), address);
+        let replaced = self.injections.insert(key.into(), address);
         assert!(replaced.is_none())
     }
 
