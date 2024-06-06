@@ -3,7 +3,7 @@ pub mod machine;
 pub mod memory;
 
 use loader::Loader;
-use machine::{Code, CodeSource::Interpreted, Machine};
+use machine::{Code, InstructionFunction, Machine};
 use memory::Memory;
 
 #[cfg(not(target_env = "msvc"))]
@@ -12,6 +12,11 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+
+    let mut memory = Memory::new();
+    let mut loader = Loader::new();
+    loader.inject_builtin(&mut memory);
+
     use machine::{Instruction::*, NumericalOperator2::*};
     let instructions = [
         // 0 captured self reference, 1 argument
@@ -33,16 +38,15 @@ fn main() -> anyhow::Result<()> {
         IntOperator2(Add, 3, 4),
         Return(5),
     ];
-    let fib = Code {
+    let fib = InstructionFunction {
         hints: "fib".into(),
         num_capture: 1,
         num_parameter: 1,
-        source: Interpreted(instructions.into()),
-        captures: Default::default(),
+        id: loader.add_code(instructions.into()),
     };
     let instructions = [
         LoadUnit,
-        LoadCode(Box::new(fib), vec![0]),
+        LoadFunction(Box::new(fib), vec![0]),
         Set(0, 1),
         LoadInjection("trace".into()),
         LoadString("start".into()),
@@ -60,16 +64,15 @@ fn main() -> anyhow::Result<()> {
         Rewind(0),
         Return(0),
     ];
-    let code = Code {
-        hints: "<main>".into(),
-        num_capture: 0,
-        num_parameter: 0,
-        source: Interpreted(instructions.into()),
-        captures: Default::default(),
-    };
-    let mut memory = Memory::new();
-    let mut loader = Loader::new();
-    loader.load_builtin(&mut memory);
+    let code = Code::new_interpreted(
+        &InstructionFunction {
+            hints: "<main>".into(),
+            num_capture: 0,
+            num_parameter: 0,
+            id: loader.add_code(instructions.into()),
+        },
+        Default::default(),
+    )?;
     let code_address = memory.allocate_any(Box::new(code));
     Machine::new().entry_execute(code_address, &mut memory, &loader)
 }

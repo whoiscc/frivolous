@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    machine::{Code, CodeSource::Native},
+    machine::{Code, Instruction},
     memory::{Address, Memory},
 };
 
@@ -49,6 +49,7 @@ mod builtin {
 #[derive(Debug, Default)]
 pub struct Loader {
     pub injections: BTreeMap<String, Address>,
+    pub code: Vec<Vec<Instruction>>,
 }
 
 impl Loader {
@@ -56,30 +57,38 @@ impl Loader {
         Self::default()
     }
 
-    fn load_builtin_code(
+    fn inject_builtin_code(
         &mut self,
         memory: &mut Memory,
         key: &str,
         num_parameter: usize,
         function: unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>,
     ) {
-        let address = memory.allocate_any(Box::new(Code {
-            hints: format!("<builtin {key}>"),
-            num_capture: 0,
+        let address = memory.allocate_any(Box::new(Code::new_native(
+            format!("<builtin {key}>"),
             num_parameter,
-            source: Native(function),
-            captures: Default::default(),
-        }));
+            function,
+        )));
         let replaced = self.injections.insert(key.into(), address);
         assert!(replaced.is_none())
     }
 
-    pub fn load_builtin(&mut self, memory: &mut Memory) {
+    pub fn inject_builtin(&mut self, memory: &mut Memory) {
         use builtin::*;
-        self.load_builtin_code(memory, "int_debug_format", 1, int_debug_format);
-        self.load_builtin_code(memory, "int_display_format", 1, int_display_format);
-        self.load_builtin_code(memory, "string_debug_format", 1, string_debug_format);
-        self.load_builtin_code(memory, "string_append", 2, string_append);
-        self.load_builtin_code(memory, "trace", 1, trace);
+        self.inject_builtin_code(memory, "int_debug_format", 1, int_debug_format);
+        self.inject_builtin_code(memory, "int_display_format", 1, int_display_format);
+        self.inject_builtin_code(memory, "string_debug_format", 1, string_debug_format);
+        self.inject_builtin_code(memory, "string_append", 2, string_append);
+        self.inject_builtin_code(memory, "trace", 1, trace);
+    }
+}
+
+pub type InterpretedCodeId = usize;
+
+impl Loader {
+    pub fn add_code(&mut self, code: Vec<Instruction>) -> InterpretedCodeId {
+        let id = self.code.len();
+        self.code.push(code);
+        id
     }
 }

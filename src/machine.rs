@@ -9,7 +9,7 @@ use anyhow::Context;
 use derive_more::Deref;
 
 use crate::{
-    loader::Loader,
+    loader::{InterpretedCodeId, Loader},
     memory::{Address, Memory},
 };
 
@@ -23,7 +23,7 @@ pub enum Instruction {
     LoadBool(bool),
     LoadInt(i32),
     LoadString(String),
-    LoadCode(Box<Code>, Vec<StackOffset>),
+    LoadFunction(Box<InstructionFunction>, Vec<StackOffset>),
     LoadLayout(Vec<String>),
     LoadType(Option<StackOffset>), // of layout, None for native types
     LoadRecord(StackOffset, Vec<String>, Vec<(String, StackOffset)>),
@@ -53,6 +53,14 @@ pub enum Instruction {
 }
 
 #[derive(Debug)]
+pub struct InstructionFunction {
+    pub hints: String,
+    pub num_capture: usize,
+    pub num_parameter: usize,
+    pub id: InterpretedCodeId,
+}
+
+#[derive(Debug)]
 pub enum NumericalOperator2 {
     Add,
     Sub,
@@ -72,19 +80,52 @@ pub enum BitwiseOperator2 {
     ShiftRight,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Code {
-    pub hints: String,
-    pub num_capture: usize,
-    pub num_parameter: usize,
-    pub source: CodeSource,
-    pub captures: Vec<Address>,
+    hints: String,
+    num_parameter: usize,
+    source: CodeSource,
 }
 
-#[derive(Debug, Clone)]
-pub enum CodeSource {
-    Interpreted(Arc<[Instruction]>),
+#[derive(Debug)]
+enum CodeSource {
+    Interpreted(Interpreted),
     Native(unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>),
+}
+
+#[derive(Debug)]
+struct Interpreted {
+    captures: Vec<Address>,
+    id: InterpretedCodeId,
+}
+
+impl Code {
+    pub fn new_interpreted(
+        function: &InstructionFunction,
+        captures: Vec<Address>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(captures.len() == function.num_capture);
+        Ok(Self {
+            hints: function.hints.clone(),
+            num_parameter: function.num_parameter,
+            source: CodeSource::Interpreted(Interpreted {
+                captures,
+                id: function.id,
+            }),
+        })
+    }
+
+    pub fn new_native(
+        hints: String,
+        num_parameter: usize,
+        function: unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>,
+    ) -> Self {
+        Self {
+            hints,
+            num_parameter,
+            source: CodeSource::Native(function),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +138,7 @@ pub struct Machine {
 #[derive(Debug)]
 struct Frame {
     code_address: Address,
+    code_id: InterpretedCodeId,
     base_offset: StackOffset,
     return_offset: StackOffset,
     instruction_offset: InstructionOffset,
@@ -117,11 +159,15 @@ impl Machine {
         anyhow::ensure!(self.frames.is_empty());
         let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
         anyhow::ensure!(code.num_parameter == 0);
-        self.stack.extend(code.captures.clone());
+        let CodeSource::Interpreted(source) = &code.source else {
+            anyhow::bail!("unsupported native code entry")
+        };
+        self.stack.extend(source.captures.clone());
         let frame = Frame {
             base_offset: 0,
-            return_offset: code.captures.len(),
+            return_offset: source.captures.len(),
             instruction_offset: 0,
+            code_id: source.id,
             code_address,
         };
         self.frames.push(frame);
@@ -190,13 +236,8 @@ impl Machine {
             let Some(frame) = self.frames.last_mut() else {
                 anyhow::bail!("evaluating frame is missing")
             };
-            let CodeSource::Interpreted(instructions) =
-                &unsafe { frame.code_address.get_downcast_ref::<Code>() }?.source
-            else {
-                anyhow::bail!("unimplemented native executable on stack frame")
-            };
             'local_jump: loop {
-                for instruction in &instructions[frame.instruction_offset..] {
+                for instruction in &loader.code[frame.code_id][frame.instruction_offset..] {
                     tracing::debug!("{instruction:?}");
                     frame.instruction_offset += 1;
                     use Instruction::*;
@@ -217,30 +258,28 @@ impl Machine {
                                 .iter()
                                 .map(|i| self.stack[frame.base_offset + *i].clone())
                                 .collect::<Vec<_>>();
-                            // i don't like every interpreted call must be downcast two times (one
-                            // here, one after nonlocal jump which probably must be there for the
-                            // returning jump)
-                            // hopefully compiler will optimize them away
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
                             match &code.source {
                                 CodeSource::Native(function) => {
-                                    anyhow::ensure!(code.captures.is_empty());
                                     anyhow::ensure!(arguments.len() == code.num_parameter);
                                     let address = unsafe { function(&arguments, memory) }?;
                                     self.stack.push(address)
                                 }
-                                CodeSource::Interpreted(_) => {
+                                CodeSource::Interpreted(source) => {
                                     anyhow::ensure!(arguments.len() == code.num_parameter);
                                     frame.return_offset = self.stack.len();
-                                    let captures = code.captures.clone();
+                                    let captures = source.captures.clone();
+
                                     let frame = Frame {
+                                        code_id: source.id,
                                         code_address,
                                         base_offset: self.stack.len(),
                                         return_offset: 0,
                                         instruction_offset: 0,
                                     };
                                     self.frames.push(frame);
-                                    self.stack.extend(captures.clone());
+
+                                    self.stack.extend(captures);
                                     self.stack.extend(arguments);
                                     continue 'nonlocal_jump;
                                 }
@@ -274,15 +313,17 @@ impl Machine {
                         LoadString(string) => self
                             .stack
                             .push(memory.allocate_any(Box::new(string.clone()))),
-                        LoadCode(code, captures) => {
-                            anyhow::ensure!(code.captures.is_empty());
-                            anyhow::ensure!(captures.len() == code.num_capture);
-                            let mut code = code.clone();
-                            code.captures = captures
+                        LoadFunction(function, captures_i) => {
+                            anyhow::ensure!(captures_i.len() == function.num_capture);
+                            let captures = captures_i
                                 .iter()
                                 .map(|i| self.stack[frame.base_offset + *i].clone())
                                 .collect();
-                            self.stack.push(memory.allocate_any(code))
+                            self.stack.push(
+                                memory.allocate_any(Box::new(Code::new_interpreted(
+                                    function, captures,
+                                )?)),
+                            )
                         }
                         LoadLayout(layout) => self.stack.push(
                             memory.allocate_any(Box::new(RecordLayout(layout.clone().into()))),
