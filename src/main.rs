@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     use machine::{Instruction::*, NumericalOperator2::*};
     let instructions = [
         // 0 captured self reference, 1 argument
-        LoadInt(2),
+        LoadInt(1000002),
         IntOperator2(LessEqual, 1, 2),
         Rewind(2),
         JumpUnless(2, 6),
@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
         Call(2, vec![3]),
         Rewind(1),
         // LoadInt(10),
-        LoadInt(32),
+        LoadInt(1000032),
         Call(0, vec![2]),
         Rewind(0),
         LoadInjection("int_display_format".into()),
@@ -74,5 +74,6 @@ fn main() -> anyhow::Result<()> {
         Default::default(),
     )?;
     let code_address = memory.allocate_any(Box::new(code));
-    Machine::new().entry_execute(code_address, &mut memory, &loader)
+    Machine::new().entry_execute(code_address, &mut memory, &loader)?;
+    Ok(())
 }

@@ -2,13 +2,15 @@ from datetime import datetime, UTC
 
 
 def main():
-    def fib(n):
-        if n <= 2:
+    fib = None
+    def f(n):
+        if n <= 1000002:
             return 1
         else:
             return fib(n - 1) + fib(n - 2)
+    fib = f
     print(datetime.now(UTC).isoformat(), "start")
-    result = fib(32)
+    result = fib(1000032)
     print(datetime.now(UTC).isoformat(), result)
 
 
