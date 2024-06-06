@@ -80,54 +80,6 @@ pub enum BitwiseOperator2 {
     ShiftRight,
 }
 
-#[derive(Debug)]
-pub struct Code {
-    hints: String,
-    num_parameter: usize,
-    source: CodeSource,
-}
-
-#[derive(Debug)]
-enum CodeSource {
-    Interpreted(Interpreted),
-    Native(unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>),
-}
-
-#[derive(Debug)]
-struct Interpreted {
-    captures: Vec<Address>,
-    id: InterpretedCodeId,
-}
-
-impl Code {
-    pub fn new_interpreted(
-        function: &InstructionFunction,
-        captures: Vec<Address>,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(captures.len() == function.num_capture);
-        Ok(Self {
-            hints: function.hints.clone(),
-            num_parameter: function.num_parameter,
-            source: CodeSource::Interpreted(Interpreted {
-                captures,
-                id: function.id,
-            }),
-        })
-    }
-
-    pub fn new_native(
-        hints: String,
-        num_parameter: usize,
-        function: unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>,
-    ) -> Self {
-        Self {
-            hints,
-            num_parameter,
-            source: CodeSource::Native(function),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct Machine {
     stack: Vec<Address>,
@@ -236,8 +188,9 @@ impl Machine {
             let Some(frame) = self.frames.last_mut() else {
                 anyhow::bail!("evaluating frame is missing")
             };
+            let instructions = &loader.code[frame.code_id];
             'local_jump: loop {
-                for instruction in &loader.code[frame.code_id][frame.instruction_offset..] {
+                for instruction in &instructions[frame.instruction_offset..] {
                     tracing::debug!("{instruction:?}");
                     frame.instruction_offset += 1;
                     use Instruction::*;
@@ -259,14 +212,13 @@ impl Machine {
                                 .map(|i| self.stack[frame.base_offset + *i].clone())
                                 .collect::<Vec<_>>();
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
+                            anyhow::ensure!(arguments.len() == code.num_parameter);
                             match &code.source {
                                 CodeSource::Native(function) => {
-                                    anyhow::ensure!(arguments.len() == code.num_parameter);
                                     let address = unsafe { function(&arguments, memory) }?;
                                     self.stack.push(address)
                                 }
                                 CodeSource::Interpreted(source) => {
-                                    anyhow::ensure!(arguments.len() == code.num_parameter);
                                     frame.return_offset = self.stack.len();
                                     let captures = source.captures.clone();
 
@@ -556,6 +508,54 @@ impl Machine {
                 }
                 anyhow::bail!("Code instructions not end with Return")
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Code {
+    hints: String,
+    num_parameter: usize,
+    source: CodeSource,
+}
+
+#[derive(Debug)]
+enum CodeSource {
+    Interpreted(Interpreted),
+    Native(unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>),
+}
+
+#[derive(Debug)]
+struct Interpreted {
+    captures: Vec<Address>,
+    id: InterpretedCodeId,
+}
+
+impl Code {
+    pub fn new_interpreted(
+        function: &InstructionFunction,
+        captures: Vec<Address>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(captures.len() == function.num_capture);
+        Ok(Self {
+            hints: function.hints.clone(),
+            num_parameter: function.num_parameter,
+            source: CodeSource::Interpreted(Interpreted {
+                captures,
+                id: function.id,
+            }),
+        })
+    }
+
+    pub fn new_native(
+        hints: String,
+        num_parameter: usize,
+        function: unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>,
+    ) -> Self {
+        Self {
+            hints,
+            num_parameter,
+            source: CodeSource::Native(function),
         }
     }
 }
