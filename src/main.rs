@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     use machine::{Instruction::*, NumericalOperator2::*};
     let instructions = [
         // 0 captured self reference, 1 argument
-        LoadInt(1000002),
+        LoadInt(2),
         IntOperator2(LessEqual, 1, 2),
         Rewind(2),
         JumpUnless(2, 6),
@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         Call(2, vec![3]),
         Rewind(1),
         // LoadInt(10),
-        LoadInt(1000035),
+        LoadInt(35),
         Call(0, vec![2]),
         Rewind(0),
         LoadInjection("int_display_format".into()),

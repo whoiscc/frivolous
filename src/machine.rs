@@ -167,7 +167,7 @@ impl Stack {
 
 #[derive(Debug)]
 struct Frame {
-    code_address: Address,
+    code_offset: StackOffset,
     code_id: InterpretedCodeId,
     stack_offset: StackOffset,
     instruction_offset: InstructionOffset,
@@ -192,13 +192,15 @@ impl Machine {
         let CodeSource::Interpreted(source) = &code.source else {
             anyhow::bail!("unsupported native code entry")
         };
+        let code_id = source.id;
         self.stack.extend(source.captures.clone());
+        self.stack.insert(0, code_address);
         let frame = Frame {
-            stack_offset: 0,
+            code_offset: 0,
+            stack_offset: 1,
             instruction_offset: 0,
             local_offset: 0,
-            code_id: source.id,
-            code_address,
+            code_id,
         };
         self.frames.push(frame);
         self.evaluate(memory, loader)
@@ -222,8 +224,8 @@ impl Display for BacktraceLine {
 }
 
 impl Frame {
-    unsafe fn backtrace_line(&self) -> BacktraceLine {
-        let code = unsafe { self.code_address.get_downcast_ref::<Code>() }.unwrap();
+    unsafe fn backtrace_line(&self, stack: &[Address]) -> BacktraceLine {
+        let code = unsafe { stack[self.code_offset].get_downcast_ref::<Code>() }.unwrap();
         BacktraceLine {
             code_hints: code.hints.clone(),
             instruction_offset: self.instruction_offset,
@@ -253,7 +255,7 @@ impl Machine {
         Backtrace(
             self.frames
                 .iter()
-                .map(|frame| unsafe { frame.backtrace_line() })
+                .map(|frame| unsafe { frame.backtrace_line(&self.stack) })
                 .collect(),
         )
     }
@@ -268,6 +270,7 @@ impl Machine {
                 for instruction in &instructions[frame.instruction_offset..] {
                     tracing::debug!("{instruction:?}");
                     frame.instruction_offset += 1;
+                    let stack = &self.stack[frame.stack_offset..];
                     use Instruction::*;
                     match instruction {
                         Jump(offset) => {
@@ -275,17 +278,15 @@ impl Machine {
                             continue 'local_jump;
                         }
                         JumpUnless(i, offset) => {
-                            if !unsafe { self.stack[frame.stack_offset + *i].get_bool() }? {
+                            if !unsafe { stack[*i].get_bool() }? {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
                         }
                         Call(code_i, args_i) => {
-                            let code_address = self.stack[frame.stack_offset + *code_i].clone();
-                            let arguments = args_i
-                                .iter()
-                                .map(|i| self.stack[frame.stack_offset + *i].clone())
-                                .collect::<Vec<_>>();
+                            let code_address = stack[*code_i].clone();
+                            let arguments =
+                                args_i.iter().map(|i| stack[*i].clone()).collect::<Vec<_>>();
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
                             anyhow::ensure!(arguments.len() == code.num_parameter);
                             match &code.source {
@@ -294,18 +295,17 @@ impl Machine {
                                     self.stack.push(address)
                                 }
                                 CodeSource::Interpreted(source) => {
-                                    let captures = source.captures.clone();
-
+                                    tracing::debug!(code_offset = frame.stack_offset + *code_i);
                                     let frame = Frame {
                                         code_id: source.id,
-                                        code_address,
+                                        code_offset: frame.stack_offset + *code_i,
                                         stack_offset: self.stack.len(),
                                         instruction_offset: 0,
                                         local_offset: 0,
                                     };
                                     self.frames.push(frame);
 
-                                    self.stack.extend(captures);
+                                    self.stack.extend(source.captures.clone());
                                     self.stack.extend(arguments);
                                     continue 'nonlocal_jump;
                                 }
@@ -326,7 +326,7 @@ impl Machine {
                         }
 
                         Rewind(i) => {
-                            anyhow::ensure!(self.stack.len() >= frame.stack_offset + *i);
+                            anyhow::ensure!(stack.len() >= *i);
                             let address = self.stack.pop().unwrap();
                             // `splice` probably can do but less readable
                             self.stack.truncate(frame.stack_offset + *i);
@@ -341,10 +341,7 @@ impl Machine {
                             .push(memory.allocate_any(Box::new(string.clone()))),
                         LoadFunction(function, captures_i) => {
                             anyhow::ensure!(captures_i.len() == function.num_capture);
-                            let captures = captures_i
-                                .iter()
-                                .map(|i| self.stack[frame.stack_offset + *i].clone())
-                                .collect();
+                            let captures = captures_i.iter().map(|i| stack[*i].clone()).collect();
                             self.stack.push(
                                 memory.allocate_any(Box::new(Code::new_interpreted(
                                     function, captures,
@@ -358,16 +355,13 @@ impl Machine {
                             self.type_id_counter += 1;
                             let t = Type {
                                 id: self.type_id_counter,
-                                layout_address: layout_i
-                                    .map(|i| self.stack[frame.stack_offset + i].clone()),
+                                layout_address: layout_i.map(|i| stack[i].clone()),
                                 attributes: Default::default(),
                             };
                             self.stack.push(memory.allocate_any(Box::new(t)))
                         }
                         LoadRecord(type_i, variants, fields) => {
-                            let mut t = unsafe {
-                                self.stack[frame.stack_offset + *type_i].get_downcast_ref::<Type>()
-                            }?;
+                            let mut t = unsafe { stack[*type_i].get_downcast_ref::<Type>() }?;
                             for variant in variants {
                                 let Some(layout_address) = &t.layout_address else {
                                     anyhow::bail!("attempting to construct record for native type")
@@ -400,7 +394,7 @@ impl Machine {
                                     .ok_or(anyhow::format_err!(
                                         "missing field {name} in record initialization"
                                     ))?;
-                                addresses.push(self.stack[frame.stack_offset + i].clone())
+                                addresses.push(stack[i].clone())
                             }
                             let record = Record {
                                 type_id: t.id,
@@ -424,9 +418,10 @@ impl Machine {
                         }
 
                         Set(i, source_i) => {
+                            let stack = &mut self.stack[frame.stack_offset..];
                             match i.cmp(source_i) {
                                 Less => {
-                                    let (stack, remaining_stack) = self.stack.split_at_mut(*i + 1);
+                                    let (stack, remaining_stack) = stack.split_at_mut(*i + 1);
                                     unsafe {
                                         stack
                                             .last_mut()
@@ -436,7 +431,7 @@ impl Machine {
                                 }
                                 Greater => {
                                     let (stack, remaining_stack) =
-                                        self.stack.split_at_mut(*source_i + 1);
+                                        stack.split_at_mut(*source_i + 1);
                                     unsafe {
                                         remaining_stack[i - source_i - 1]
                                             .copy_from(stack.last().unwrap())
@@ -446,29 +441,25 @@ impl Machine {
                             }
                         }
                         RecordGet(i, name) => {
-                            let record = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Record>()
-                            }?;
+                            let record = unsafe { stack[*i].get_downcast_ref::<Record>() }?;
                             self.stack.push(record.get_ref(name)?.clone())
                         }
                         RecordSet(i, name, j) => {
-                            let address = self.stack[frame.stack_offset + *j].clone();
+                            let address = stack[*j].clone();
                             *unsafe {
                                 self.stack[frame.stack_offset + *i].get_downcast_mut::<Record>()
                             }?
                             .get_mut(name)? = address
                         }
                         TypeGet(i, name) => {
-                            let t = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Type>()
-                            }?;
+                            let t = unsafe { stack[*i].get_downcast_ref::<Type>() }?;
                             let Some(address) = t.attributes.get(name) else {
                                 anyhow::bail!("there is no attribute {name} on type object")
                             };
                             self.stack.push(address.clone())
                         }
                         TypeSet(i, name, j) => {
-                            let address = self.stack[frame.stack_offset + *j].clone();
+                            let address = stack[*j].clone();
                             let t = unsafe {
                                 self.stack[frame.stack_offset + *i].get_downcast_mut::<Type>()
                             }?;
@@ -479,18 +470,14 @@ impl Machine {
                             )
                         }
                         TraitGet(i, implementor, name) => {
-                            let t = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Trait>()
-                            }?;
+                            let t = unsafe { stack[*i].get_downcast_ref::<Trait>() }?;
                             let Some(p) = t.layout.iter().position(|other_name| other_name == name)
                             else {
                                 anyhow::bail!("field `{name}` not found in trait layout")
                             };
                             let mut k = Vec::new();
                             for i in implementor {
-                                let t = unsafe {
-                                    self.stack[frame.stack_offset + *i].get_downcast_ref::<Type>()
-                                }?;
+                                let t = unsafe { stack[*i].get_downcast_ref::<Type>() }?;
                                 k.push(t.id)
                             }
                             let Some(addresses) = t.implementations.get(&k) else {
@@ -499,14 +486,10 @@ impl Machine {
                             self.stack.push(addresses[p].clone())
                         }
                         Impl(i, implementor, fields) => {
-                            let t = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Trait>()
-                            }?;
+                            let t = unsafe { stack[*i].get_downcast_ref::<Trait>() }?;
                             let mut k = Vec::new();
                             for i in implementor {
-                                let t = unsafe {
-                                    self.stack[frame.stack_offset + *i].get_downcast_ref::<Type>()
-                                }?;
+                                let t = unsafe { stack[*i].get_downcast_ref::<Type>() }?;
                                 k.push(t.id)
                             }
                             let mut addresses = Vec::new();
@@ -525,7 +508,7 @@ impl Machine {
                                     .ok_or(anyhow::format_err!(
                                         "missing field `{name}` in trait implementation"
                                     ))?;
-                                addresses.push(self.stack[frame.stack_offset + i].clone())
+                                addresses.push(stack[i].clone())
                             }
                             let replaced = unsafe {
                                 self.stack[frame.stack_offset + *i].get_downcast_mut::<Trait>()
@@ -540,18 +523,14 @@ impl Machine {
                         }
 
                         Is(i, j) => {
-                            let r = unsafe {
-                                self.stack[frame.stack_offset + *j].get_downcast_ref::<Type>()
-                            }?;
+                            let r = unsafe { stack[*j].get_downcast_ref::<Type>() }?;
                             // TODO support other types
-                            let l = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Record>()
-                            }?;
+                            let l = unsafe { stack[*i].get_downcast_ref::<Record>() }?;
                             self.stack.push(memory.allocate_bool(l.type_id == r.id))
                         }
                         IntOperator2(op, i, j) => {
-                            let l = unsafe { self.stack[frame.stack_offset + *i].get_int() }?;
-                            let r = unsafe { self.stack[frame.stack_offset + *j].get_int() }?;
+                            let l = unsafe { stack[*i].get_int() }?;
+                            let r = unsafe { stack[*j].get_int() }?;
                             tracing::debug!("  {op:?} {l} {r}");
                             use NumericalOperator2::*;
                             let address = match op {
@@ -567,8 +546,8 @@ impl Machine {
                             self.stack.push(address)
                         }
                         BitwiseOperator2(op, i, j) => {
-                            let l = unsafe { self.stack[frame.stack_offset + *i].get_int() }?;
-                            let r = unsafe { self.stack[frame.stack_offset + *j].get_int() }?;
+                            let l = unsafe { stack[*i].get_int() }?;
+                            let r = unsafe { stack[*j].get_int() }?;
                             use crate::machine::BitwiseOperator2::*;
                             let address = match op {
                                 And => memory.allocate_int(l & r),
