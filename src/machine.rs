@@ -6,7 +6,6 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Context;
 use derive_more::Deref;
 
 use crate::{
@@ -202,7 +201,7 @@ impl Machine {
             code_address,
         };
         self.frames.push(frame);
-        self.evaluate_with_backtrace(memory, loader)
+        self.evaluate(memory, loader)
     }
 }
 
@@ -237,6 +236,9 @@ pub struct Backtrace(pub Vec<BacktraceLine>);
 
 impl Display for Backtrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            return write!(f, "(empty backtrace)");
+        }
         let mut prefix = "";
         for line in &**self {
             write!(f, "{prefix}{line}")?;
@@ -247,19 +249,13 @@ impl Display for Backtrace {
 }
 
 impl Machine {
-    fn evaluate_with_backtrace(
-        &mut self,
-        memory: &mut Memory,
-        loader: &Loader,
-    ) -> anyhow::Result<()> {
-        self.evaluate(memory, loader).with_context(|| {
-            Backtrace(
-                self.frames
-                    .iter()
-                    .map(|frame| unsafe { frame.backtrace_line() })
-                    .collect(),
-            )
-        })
+    pub fn backtrace(&self) -> Backtrace {
+        Backtrace(
+            self.frames
+                .iter()
+                .map(|frame| unsafe { frame.backtrace_line() })
+                .collect(),
+        )
     }
 
     fn evaluate(&mut self, memory: &mut Memory, loader: &Loader) -> anyhow::Result<()> {

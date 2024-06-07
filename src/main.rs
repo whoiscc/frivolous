@@ -2,6 +2,7 @@ pub mod loader;
 pub mod machine;
 pub mod memory;
 
+use anyhow::Context;
 use loader::Loader;
 use machine::{Code, InstructionFunction, Machine};
 use memory::Memory;
@@ -74,6 +75,8 @@ fn main() -> anyhow::Result<()> {
         Default::default(),
     )?;
     let code_address = memory.allocate_any(Box::new(code));
-    Machine::new().entry_execute(code_address, &mut memory, &loader)?;
-    Ok(())
+    let mut machine = Machine::new();
+    machine
+        .entry_execute(code_address, &mut memory, &loader)
+        .context(machine.backtrace())
 }
