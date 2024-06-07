@@ -10,7 +10,7 @@ def main():
             return fib(n - 1) + fib(n - 2)
     fib = f
     print(datetime.now(UTC).isoformat(), "start")
-    result = fib(1000032)
+    result = fib(1000035)
     print(datetime.now(UTC).isoformat(), result)
 
 

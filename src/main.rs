@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
         Call(2, vec![3]),
         Rewind(1),
         // LoadInt(10),
-        LoadInt(1000032),
+        LoadInt(1000035),
         Call(0, vec![2]),
         Rewind(0),
         LoadInjection("int_display_format".into()),

@@ -1,4 +1,5 @@
 use std::{
+    any::type_name,
     cmp::Ordering::{Greater, Less},
     collections::BTreeMap,
     fmt::Display,
@@ -10,7 +11,7 @@ use derive_more::Deref;
 
 use crate::{
     loader::{InterpretedCodeId, Loader},
-    memory::{Address, Memory},
+    memory::{Address, Memory, TypeError},
 };
 
 pub type CodeId = usize;
@@ -87,13 +88,91 @@ pub struct Machine {
     type_id_counter: TypeId,
 }
 
+#[derive(Debug, Default)]
+struct Stack {
+    offsets: Vec<StackVariable>,
+    locals: Vec<Local>,
+}
+
+#[derive(Debug, Clone)]
+enum StackVariable {
+    Address(Address),
+    Local(usize),
+}
+
+#[derive(Debug)]
+enum Local {
+    Unit,
+    Bool(bool),
+    Int(i32),
+}
+
+impl Stack {
+    fn escape(&mut self, i: usize, memory: &mut Memory) -> &Address {
+        let variable = &mut self.offsets[i];
+        if let StackVariable::Local(index) = variable {
+            *variable = StackVariable::Address(match &self.locals[*index] {
+                Local::Unit => memory.allocate_unit(),
+                Local::Bool(b) => memory.allocate_bool(*b),
+                Local::Int(int) => memory.allocate_int(*int),
+            })
+        }
+        let StackVariable::Address(address) = variable else {
+            unreachable!()
+        };
+        address
+    }
+
+    unsafe fn get_bool(&self, i: usize) -> anyhow::Result<bool> {
+        match &self.offsets[i] {
+            StackVariable::Address(address) => unsafe { address.get_bool() },
+            StackVariable::Local(index) => {
+                let Local::Bool(b) = &self.locals[*index] else {
+                    anyhow::bail!(TypeError { expected: "bool" })
+                };
+                Ok(*b)
+            }
+        }
+    }
+
+    unsafe fn get_int(&self, i: usize) -> anyhow::Result<i32> {
+        match &self.offsets[i] {
+            StackVariable::Address(address) => unsafe { address.get_int() },
+            StackVariable::Local(index) => {
+                let Local::Int(int) = &self.locals[*index] else {
+                    anyhow::bail!(TypeError { expected: "int" })
+                };
+                Ok(*int)
+            }
+        }
+    }
+
+    unsafe fn get_downcast_ref<T: 'static>(&self, i: usize) -> anyhow::Result<&T> {
+        let StackVariable::Address(address) = &self.offsets[i] else {
+            anyhow::bail!(TypeError {
+                expected: type_name::<T>()
+            })
+        };
+        address.get_downcast_ref()
+    }
+
+    unsafe fn get_downcast_mut<T: 'static>(&self, i: usize) -> anyhow::Result<&mut T> {
+        let StackVariable::Address(address) = &self.offsets[i] else {
+            anyhow::bail!(TypeError {
+                expected: type_name::<T>()
+            })
+        };
+        address.get_downcast_mut()
+    }
+}
+
 #[derive(Debug)]
 struct Frame {
     code_address: Address,
     code_id: InterpretedCodeId,
-    base_offset: StackOffset,
-    return_offset: StackOffset,
+    stack_offset: StackOffset,
     instruction_offset: InstructionOffset,
+    local_offset: usize,
 }
 
 impl Machine {
@@ -116,9 +195,9 @@ impl Machine {
         };
         self.stack.extend(source.captures.clone());
         let frame = Frame {
-            base_offset: 0,
-            return_offset: source.captures.len(),
+            stack_offset: 0,
             instruction_offset: 0,
+            local_offset: 0,
             code_id: source.id,
             code_address,
         };
@@ -200,16 +279,16 @@ impl Machine {
                             continue 'local_jump;
                         }
                         JumpUnless(i, offset) => {
-                            if !unsafe { self.stack[frame.base_offset + *i].get_bool() }? {
+                            if !unsafe { self.stack[frame.stack_offset + *i].get_bool() }? {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
                         }
                         Call(code_i, args_i) => {
-                            let code_address = self.stack[frame.base_offset + *code_i].clone();
+                            let code_address = self.stack[frame.stack_offset + *code_i].clone();
                             let arguments = args_i
                                 .iter()
-                                .map(|i| self.stack[frame.base_offset + *i].clone())
+                                .map(|i| self.stack[frame.stack_offset + *i].clone())
                                 .collect::<Vec<_>>();
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
                             anyhow::ensure!(arguments.len() == code.num_parameter);
@@ -219,15 +298,14 @@ impl Machine {
                                     self.stack.push(address)
                                 }
                                 CodeSource::Interpreted(source) => {
-                                    frame.return_offset = self.stack.len();
                                     let captures = source.captures.clone();
 
                                     let frame = Frame {
                                         code_id: source.id,
                                         code_address,
-                                        base_offset: self.stack.len(),
-                                        return_offset: 0,
+                                        stack_offset: self.stack.len(),
                                         instruction_offset: 0,
+                                        local_offset: 0,
                                     };
                                     self.frames.push(frame);
 
@@ -238,10 +316,10 @@ impl Machine {
                             }
                         }
                         Return(i) => {
-                            let address = self.stack.remove(frame.base_offset + *i);
-                            self.frames.pop();
-                            if let Some(frame) = self.frames.last_mut() {
-                                self.stack.truncate(frame.return_offset);
+                            let address = self.stack.remove(frame.stack_offset + *i);
+                            let popped_frame = self.frames.pop().unwrap();
+                            if !self.frames.is_empty() {
+                                self.stack.truncate(popped_frame.stack_offset);
                                 self.stack.push(address);
                                 continue 'nonlocal_jump;
                             } else {
@@ -252,10 +330,10 @@ impl Machine {
                         }
 
                         Rewind(i) => {
-                            anyhow::ensure!(self.stack.len() >= frame.base_offset + *i);
+                            anyhow::ensure!(self.stack.len() >= frame.stack_offset + *i);
                             let address = self.stack.pop().unwrap();
                             // `splice` probably can do but less readable
-                            self.stack.truncate(frame.base_offset + *i);
+                            self.stack.truncate(frame.stack_offset + *i);
                             self.stack.push(address)
                         }
 
@@ -269,7 +347,7 @@ impl Machine {
                             anyhow::ensure!(captures_i.len() == function.num_capture);
                             let captures = captures_i
                                 .iter()
-                                .map(|i| self.stack[frame.base_offset + *i].clone())
+                                .map(|i| self.stack[frame.stack_offset + *i].clone())
                                 .collect();
                             self.stack.push(
                                 memory.allocate_any(Box::new(Code::new_interpreted(
@@ -285,14 +363,14 @@ impl Machine {
                             let t = Type {
                                 id: self.type_id_counter,
                                 layout_address: layout_i
-                                    .map(|i| self.stack[frame.base_offset + i].clone()),
+                                    .map(|i| self.stack[frame.stack_offset + i].clone()),
                                 attributes: Default::default(),
                             };
                             self.stack.push(memory.allocate_any(Box::new(t)))
                         }
                         LoadRecord(type_i, variants, fields) => {
                             let mut t = unsafe {
-                                self.stack[frame.base_offset + *type_i].get_downcast_ref::<Type>()
+                                self.stack[frame.stack_offset + *type_i].get_downcast_ref::<Type>()
                             }?;
                             for variant in variants {
                                 let Some(layout_address) = &t.layout_address else {
@@ -326,7 +404,7 @@ impl Machine {
                                     .ok_or(anyhow::format_err!(
                                         "missing field {name} in record initialization"
                                     ))?;
-                                addresses.push(self.stack[frame.base_offset + i].clone())
+                                addresses.push(self.stack[frame.stack_offset + i].clone())
                             }
                             let record = Record {
                                 type_id: t.id,
@@ -373,20 +451,20 @@ impl Machine {
                         }
                         RecordGet(i, name) => {
                             let record = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_ref::<Record>()
+                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Record>()
                             }?;
                             self.stack.push(record.get_ref(name)?.clone())
                         }
                         RecordSet(i, name, j) => {
-                            let address = self.stack[frame.base_offset + *j].clone();
+                            let address = self.stack[frame.stack_offset + *j].clone();
                             *unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_mut::<Record>()
+                                self.stack[frame.stack_offset + *i].get_downcast_mut::<Record>()
                             }?
                             .get_mut(name)? = address
                         }
                         TypeGet(i, name) => {
                             let t = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_ref::<Type>()
+                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Type>()
                             }?;
                             let Some(address) = t.attributes.get(name) else {
                                 anyhow::bail!("there is no attribute {name} on type object")
@@ -394,9 +472,9 @@ impl Machine {
                             self.stack.push(address.clone())
                         }
                         TypeSet(i, name, j) => {
-                            let address = self.stack[frame.base_offset + *j].clone();
+                            let address = self.stack[frame.stack_offset + *j].clone();
                             let t = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_mut::<Type>()
+                                self.stack[frame.stack_offset + *i].get_downcast_mut::<Type>()
                             }?;
                             let replaced = t.attributes.insert(name.clone(), address);
                             anyhow::ensure!(
@@ -406,7 +484,7 @@ impl Machine {
                         }
                         TraitGet(i, implementor, name) => {
                             let t = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_ref::<Trait>()
+                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Trait>()
                             }?;
                             let Some(p) = t.layout.iter().position(|other_name| other_name == name)
                             else {
@@ -415,7 +493,7 @@ impl Machine {
                             let mut k = Vec::new();
                             for i in implementor {
                                 let t = unsafe {
-                                    self.stack[frame.base_offset + *i].get_downcast_ref::<Type>()
+                                    self.stack[frame.stack_offset + *i].get_downcast_ref::<Type>()
                                 }?;
                                 k.push(t.id)
                             }
@@ -426,12 +504,12 @@ impl Machine {
                         }
                         Impl(i, implementor, fields) => {
                             let t = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_ref::<Trait>()
+                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Trait>()
                             }?;
                             let mut k = Vec::new();
                             for i in implementor {
                                 let t = unsafe {
-                                    self.stack[frame.base_offset + *i].get_downcast_ref::<Type>()
+                                    self.stack[frame.stack_offset + *i].get_downcast_ref::<Type>()
                                 }?;
                                 k.push(t.id)
                             }
@@ -451,10 +529,10 @@ impl Machine {
                                     .ok_or(anyhow::format_err!(
                                         "missing field `{name}` in trait implementation"
                                     ))?;
-                                addresses.push(self.stack[frame.base_offset + i].clone())
+                                addresses.push(self.stack[frame.stack_offset + i].clone())
                             }
                             let replaced = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_mut::<Trait>()
+                                self.stack[frame.stack_offset + *i].get_downcast_mut::<Trait>()
                             }
                             .unwrap()
                             .implementations
@@ -467,17 +545,17 @@ impl Machine {
 
                         Is(i, j) => {
                             let r = unsafe {
-                                self.stack[frame.base_offset + *j].get_downcast_ref::<Type>()
+                                self.stack[frame.stack_offset + *j].get_downcast_ref::<Type>()
                             }?;
                             // TODO support other types
                             let l = unsafe {
-                                self.stack[frame.base_offset + *i].get_downcast_ref::<Record>()
+                                self.stack[frame.stack_offset + *i].get_downcast_ref::<Record>()
                             }?;
                             self.stack.push(memory.allocate_bool(l.type_id == r.id))
                         }
                         IntOperator2(op, i, j) => {
-                            let l = unsafe { self.stack[frame.base_offset + *i].get_int() }?;
-                            let r = unsafe { self.stack[frame.base_offset + *j].get_int() }?;
+                            let l = unsafe { self.stack[frame.stack_offset + *i].get_int() }?;
+                            let r = unsafe { self.stack[frame.stack_offset + *j].get_int() }?;
                             tracing::debug!("  {op:?} {l} {r}");
                             use NumericalOperator2::*;
                             let address = match op {
@@ -493,8 +571,8 @@ impl Machine {
                             self.stack.push(address)
                         }
                         BitwiseOperator2(op, i, j) => {
-                            let l = unsafe { self.stack[frame.base_offset + *i].get_int() }?;
-                            let r = unsafe { self.stack[frame.base_offset + *j].get_int() }?;
+                            let l = unsafe { self.stack[frame.stack_offset + *i].get_int() }?;
+                            let r = unsafe { self.stack[frame.stack_offset + *j].get_int() }?;
                             use crate::machine::BitwiseOperator2::*;
                             let address = match op {
                                 And => memory.allocate_int(l & r),
