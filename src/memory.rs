@@ -69,9 +69,10 @@ impl Memory {
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display(fmt = "TypeError: expected {expected} from content {content}")]
 pub struct TypeError {
     pub expected: &'static str,
-    //
+    pub content: String,
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -89,31 +90,44 @@ impl Address {
     }
 
     pub unsafe fn get_unit(&self) -> anyhow::Result<()> {
-        let BlockContent::Unit = (unsafe { self.content_ref() }) else {
-            anyhow::bail!(TypeError { expected: "Unit" })
+        let content = unsafe { self.content_ref() };
+        let BlockContent::Unit = content else {
+            anyhow::bail!(TypeError {
+                expected: "Unit",
+                content: format!("{content:?}")
+            })
         };
         Ok(())
     }
 
     pub unsafe fn get_bool(&self) -> anyhow::Result<bool> {
-        let BlockContent::Bool(b) = (unsafe { self.content_ref() }) else {
-            anyhow::bail!(TypeError { expected: "Bool" })
+        let content = unsafe { self.content_ref() };
+        let BlockContent::Bool(b) = content else {
+            anyhow::bail!(TypeError {
+                expected: "Bool",
+                content: format!("{content:?}")
+            })
         };
         Ok(*b)
     }
 
     pub unsafe fn get_int(&self) -> anyhow::Result<i32> {
-        let BlockContent::Int(int) = (unsafe { self.content_ref() }) else {
-            anyhow::bail!(TypeError { expected: "Int" })
+        let content = unsafe { self.content_ref() };
+        let BlockContent::Int(int) = content else {
+            anyhow::bail!(TypeError {
+                expected: "Int",
+                content: format!("{content:?}")
+            })
         };
         Ok(*int)
     }
 
     pub unsafe fn get_any_ref(&self) -> anyhow::Result<&dyn Any> {
-        let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
-            tracing::warn!("block content not Any");
+        let content = unsafe { self.content_ref() };
+        let BlockContent::Any(any) = content else {
             anyhow::bail!(TypeError {
-                expected: "(dynamical typed)"
+                expected: "(dynamical typed)",
+                content: format!("{content:?}")
             })
         };
         any.get_ref()
@@ -121,35 +135,44 @@ impl Address {
 
     // need to rethink about mutability rules
     pub unsafe fn get_any_mut(&self) -> anyhow::Result<&mut dyn Any> {
-        let BlockContent::Any(any) = (unsafe { self.content_ref() }) else {
-            tracing::warn!("block content not Any");
+        let content = unsafe { self.content_ref() };
+        let BlockContent::Any(any) = content else {
             anyhow::bail!(TypeError {
-                expected: "(dynamical typed)"
+                expected: "(dynamical typed)",
+                content: format!("{content:?}")
             })
         };
         any.get_mut()
     }
 
     pub unsafe fn get_downcast_ref<T: 'static>(&self) -> anyhow::Result<&T> {
-        match self.get_any_ref().map(|any| any.downcast_ref()) {
-            Ok(Some(any)) => Ok(any),
-            Err(err) if !err.is::<TypeError>() => Err(err),
-            _ => Err(TypeError {
-                expected: type_name::<T>(),
+        let any = unsafe { self.get_any_ref() }.map_err(|mut err| {
+            if let Some(err) = err.downcast_mut::<TypeError>() {
+                err.expected = type_name::<T>()
             }
-            .into()),
-        }
+            err
+        })?;
+        any.downcast_ref().ok_or(
+            TypeError {
+                expected: type_name::<T>(),
+                content: format!("Any(id = {:?})", any.type_id()),
+            }
+            .into(),
+        )
     }
 
     pub unsafe fn get_downcast_mut<T: 'static>(&self) -> anyhow::Result<&mut T> {
-        match self.get_any_mut().map(|any| any.downcast_mut()) {
-            Ok(Some(any)) => Ok(any),
-            Err(err) if !err.is::<TypeError>() => Err(err),
-            _ => Err(TypeError {
-                expected: type_name::<T>(),
+        let any = unsafe { self.get_any_mut() }.map_err(|mut err| {
+            if let Some(err) = err.downcast_mut::<TypeError>() {
+                err.expected = type_name::<T>()
             }
-            .into()),
-        }
+            err
+        })?;
+        let type_error = TypeError {
+            expected: type_name::<T>(),
+            content: format!("Any(id = {:?})", (any as &dyn Any).type_id()),
+        };
+        any.downcast_mut().ok_or(type_error.into())
     }
 }
 

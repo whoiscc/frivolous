@@ -1,10 +1,4 @@
-use std::{
-    any::type_name,
-    cmp::Ordering::{Greater, Less},
-    collections::BTreeMap,
-    fmt::Display,
-    sync::Arc,
-};
+use std::{any::type_name, collections::BTreeMap, fmt::Display, sync::Arc};
 
 use derive_more::Deref;
 
@@ -82,7 +76,7 @@ pub enum BitwiseOperator2 {
 
 #[derive(Debug, Default)]
 pub struct Machine {
-    stack: Vec<Address>,
+    stack: Stack,
     frames: Vec<Frame>,
     type_id_counter: TypeId,
 }
@@ -99,70 +93,11 @@ enum StackVariable {
     Local(usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Local {
     Unit,
     Bool(bool),
     Int(i32),
-}
-
-impl Stack {
-    fn escape(&mut self, i: usize, memory: &mut Memory) -> &Address {
-        let variable = &mut self.offsets[i];
-        if let StackVariable::Local(index) = variable {
-            *variable = StackVariable::Address(match &self.locals[*index] {
-                Local::Unit => memory.allocate_unit(),
-                Local::Bool(b) => memory.allocate_bool(*b),
-                Local::Int(int) => memory.allocate_int(*int),
-            })
-        }
-        let StackVariable::Address(address) = variable else {
-            unreachable!()
-        };
-        address
-    }
-
-    unsafe fn get_bool(&self, i: usize) -> anyhow::Result<bool> {
-        match &self.offsets[i] {
-            StackVariable::Address(address) => unsafe { address.get_bool() },
-            StackVariable::Local(index) => {
-                let Local::Bool(b) = &self.locals[*index] else {
-                    anyhow::bail!(TypeError { expected: "bool" })
-                };
-                Ok(*b)
-            }
-        }
-    }
-
-    unsafe fn get_int(&self, i: usize) -> anyhow::Result<i32> {
-        match &self.offsets[i] {
-            StackVariable::Address(address) => unsafe { address.get_int() },
-            StackVariable::Local(index) => {
-                let Local::Int(int) = &self.locals[*index] else {
-                    anyhow::bail!(TypeError { expected: "int" })
-                };
-                Ok(*int)
-            }
-        }
-    }
-
-    unsafe fn get_downcast_ref<T: 'static>(&self, i: usize) -> anyhow::Result<&T> {
-        let StackVariable::Address(address) = &self.offsets[i] else {
-            anyhow::bail!(TypeError {
-                expected: type_name::<T>()
-            })
-        };
-        address.get_downcast_ref()
-    }
-
-    unsafe fn get_downcast_mut<T: 'static>(&self, i: usize) -> anyhow::Result<&mut T> {
-        let StackVariable::Address(address) = &self.offsets[i] else {
-            anyhow::bail!(TypeError {
-                expected: type_name::<T>()
-            })
-        };
-        address.get_downcast_mut()
-    }
 }
 
 #[derive(Debug)]
@@ -185,7 +120,8 @@ impl Machine {
         memory: &mut Memory,
         loader: &Loader,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.stack.is_empty());
+        anyhow::ensure!(self.stack.offsets.is_empty());
+        assert!(self.stack.locals.is_empty());
         anyhow::ensure!(self.frames.is_empty());
         let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
         anyhow::ensure!(code.num_parameter == 0);
@@ -193,8 +129,15 @@ impl Machine {
             anyhow::bail!("unsupported native code entry")
         };
         let code_id = source.id;
-        self.stack.extend(source.captures.clone());
-        self.stack.insert(0, code_address);
+        self.stack.offsets.extend(
+            source
+                .captures
+                .iter()
+                .map(|address| StackVariable::Address(address.clone())),
+        );
+        self.stack
+            .offsets
+            .insert(0, StackVariable::Address(code_address));
         let frame = Frame {
             code_offset: 0,
             stack_offset: 1,
@@ -224,8 +167,8 @@ impl Display for BacktraceLine {
 }
 
 impl Frame {
-    unsafe fn backtrace_line(&self, stack: &[Address]) -> BacktraceLine {
-        let code = unsafe { stack[self.code_offset].get_downcast_ref::<Code>() }.unwrap();
+    unsafe fn backtrace_line(&self, stack: &Stack) -> BacktraceLine {
+        let code = unsafe { stack.get_downcast_ref::<Code>(self.code_offset) }.unwrap();
         BacktraceLine {
             code_hints: code.hints.clone(),
             instruction_offset: self.instruction_offset,
@@ -268,100 +211,142 @@ impl Machine {
             let instructions = &loader.code[frame.code_id];
             'local_jump: loop {
                 for instruction in &instructions[frame.instruction_offset..] {
-                    tracing::debug!("{instruction:?}");
+                    tracing::trace!("{instruction:?}");
                     frame.instruction_offset += 1;
-                    let stack = &self.stack[frame.stack_offset..];
-                    use Instruction::*;
+                    use {Instruction::*, StackVariable::*};
                     match instruction {
                         Jump(offset) => {
                             frame.instruction_offset = *offset;
                             continue 'local_jump;
                         }
                         JumpUnless(i, offset) => {
-                            if !unsafe { stack[*i].get_bool() }? {
+                            if !unsafe { self.stack.get_bool(frame.stack_offset + *i) }? {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
                         }
                         Call(code_i, args_i) => {
-                            let code_address = stack[*code_i].clone();
-                            let arguments =
-                                args_i.iter().map(|i| stack[*i].clone()).collect::<Vec<_>>();
-                            let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
-                            anyhow::ensure!(arguments.len() == code.num_parameter);
+                            let code = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Code>(frame.stack_offset + *code_i)
+                            }?;
+                            anyhow::ensure!(args_i.len() == code.num_parameter);
                             match &code.source {
-                                CodeSource::Native(function) => {
+                                &CodeSource::Native(function) => {
+                                    let arguments = args_i
+                                        .iter()
+                                        .map(|i| self.stack.escape(frame.stack_offset + *i, memory))
+                                        .collect::<Vec<_>>();
                                     let address = unsafe { function(&arguments, memory) }?;
-                                    self.stack.push(address)
+                                    self.stack.offsets.push(Address(address))
                                 }
                                 CodeSource::Interpreted(source) => {
-                                    tracing::debug!(code_offset = frame.stack_offset + *code_i);
+                                    let stack_offset = self.stack.offsets.len();
+                                    let local_offset = self.stack.locals.len();
+                                    let code_id = source.id;
+
+                                    let captures = source
+                                        .captures
+                                        .iter()
+                                        .map(|address| Address(address.clone()))
+                                        .collect::<Vec<_>>();
+                                    self.stack.offsets.extend(captures);
+                                    for i in args_i {
+                                        self.stack.offsets.push(
+                                            self.stack.offsets[frame.stack_offset + *i].clone(),
+                                        )
+                                    }
+
                                     let frame = Frame {
-                                        code_id: source.id,
+                                        code_id,
                                         code_offset: frame.stack_offset + *code_i,
-                                        stack_offset: self.stack.len(),
+                                        stack_offset,
                                         instruction_offset: 0,
-                                        local_offset: 0,
+                                        local_offset,
                                     };
                                     self.frames.push(frame);
-
-                                    self.stack.extend(source.captures.clone());
-                                    self.stack.extend(arguments);
                                     continue 'nonlocal_jump;
                                 }
                             }
                         }
                         Return(i) => {
-                            let address = self.stack.remove(frame.stack_offset + *i);
                             let popped_frame = self.frames.pop().unwrap();
                             if !self.frames.is_empty() {
-                                self.stack.truncate(popped_frame.stack_offset);
-                                self.stack.push(address);
+                                let mut variable = self
+                                    .stack
+                                    .offsets
+                                    .drain(popped_frame.stack_offset..)
+                                    .nth(*i)
+                                    .unwrap();
+                                let mut drained_locals =
+                                    self.stack.locals.drain(popped_frame.local_offset..);
+                                if let Local(index) = variable {
+                                    if index >= popped_frame.local_offset {
+                                        let local = drained_locals
+                                            .nth(index - popped_frame.local_offset)
+                                            .unwrap();
+                                        drop(drained_locals);
+                                        self.stack.locals.push(local);
+                                        variable = Local(popped_frame.local_offset)
+                                    }
+                                }
+                                self.stack.offsets.push(variable);
                                 continue 'nonlocal_jump;
                             } else {
-                                unsafe { address.get_unit() }?;
-                                self.stack.clear();
+                                unsafe { self.stack.get_unit(popped_frame.stack_offset + *i) }?;
+                                self.stack.offsets.clear();
+                                self.stack.locals.clear();
                                 return Ok(());
                             };
                         }
 
                         Rewind(i) => {
-                            anyhow::ensure!(stack.len() >= *i);
-                            let address = self.stack.pop().unwrap();
-                            // `splice` probably can do but less readable
-                            self.stack.truncate(frame.stack_offset + *i);
-                            self.stack.push(address)
+                            anyhow::ensure!(self.stack.offsets.len() >= *i);
+                            let variable = self.stack.offsets.pop().unwrap();
+                            self.stack
+                                .offsets
+                                .splice(frame.stack_offset + *i.., [variable]);
                         }
 
-                        LoadUnit => self.stack.push(memory.allocate_unit()),
-                        LoadBool(b) => self.stack.push(memory.allocate_bool(*b)),
-                        LoadInt(int) => self.stack.push(memory.allocate_int(*int)),
+                        LoadUnit => self.stack.push_local(crate::machine::Local::Unit),
+                        LoadBool(b) => self.stack.push_local(crate::machine::Local::Bool(*b)),
+                        LoadInt(int) => self.stack.push_local(crate::machine::Local::Int(*int)),
                         LoadString(string) => self
                             .stack
-                            .push(memory.allocate_any(Box::new(string.clone()))),
+                            .offsets
+                            .push(Address(memory.allocate_any(Box::new(string.clone())))),
                         LoadFunction(function, captures_i) => {
                             anyhow::ensure!(captures_i.len() == function.num_capture);
-                            let captures = captures_i.iter().map(|i| stack[*i].clone()).collect();
-                            self.stack.push(
-                                memory.allocate_any(Box::new(Code::new_interpreted(
-                                    function, captures,
-                                )?)),
-                            )
+                            let captures = captures_i
+                                .iter()
+                                .map(|i| self.stack.escape(frame.stack_offset + *i, memory))
+                                .collect();
+                            self.stack
+                                .offsets
+                                .push(Address(memory.allocate_any(Box::new(
+                                    Code::new_interpreted(function, captures)?,
+                                ))))
                         }
-                        LoadLayout(layout) => self.stack.push(
+                        LoadLayout(layout) => self.stack.offsets.push(Address(
                             memory.allocate_any(Box::new(RecordLayout(layout.clone().into()))),
-                        ),
+                        )),
                         LoadType(layout_i) => {
                             self.type_id_counter += 1;
                             let t = Type {
                                 id: self.type_id_counter,
-                                layout_address: layout_i.map(|i| stack[i].clone()),
+                                layout_address: layout_i
+                                    .map(|i| self.stack.escape(frame.stack_offset + i, memory)),
                                 attributes: Default::default(),
                             };
-                            self.stack.push(memory.allocate_any(Box::new(t)))
+                            self.stack
+                                .offsets
+                                .push(Address(memory.allocate_any(Box::new(t))))
                         }
                         LoadRecord(type_i, variants, fields) => {
-                            let mut t = unsafe { stack[*type_i].get_downcast_ref::<Type>() }?;
+                            let mut t = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Type>(frame.stack_offset + *type_i)
+                            }?;
                             for variant in variants {
                                 let Some(layout_address) = &t.layout_address else {
                                     anyhow::bail!("attempting to construct record for native type")
@@ -378,140 +363,168 @@ impl Machine {
                             };
                             let RecordLayout(layout) =
                                 unsafe { layout_address.get_downcast_ref() }?;
-                            let mut addresses = Vec::new();
-                            for name in &**layout {
-                                let i = fields
+                            let offsets =
+                                layout
                                     .iter()
-                                    .find_map(
-                                        |(other_name, i)| {
-                                            if other_name == name {
-                                                Some(*i)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                    )
-                                    .ok_or(anyhow::format_err!(
-                                        "missing field {name} in record initialization"
-                                    ))?;
-                                addresses.push(stack[i].clone())
-                            }
+                                    .map(|name| {
+                                        fields
+                                            .iter()
+                                            .find_map(|(other_name, i)| {
+                                                if other_name == name {
+                                                    Some(*i)
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .ok_or(anyhow::format_err!(
+                                                "missing field {name} in record initialization"
+                                            ))
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
                             let record = Record {
                                 type_id: t.id,
                                 layout: layout.clone(),
-                                addresses: addresses.into(),
+                                addresses: offsets
+                                    .into_iter()
+                                    .map(|i| self.stack.escape(frame.stack_offset + i, memory))
+                                    .collect(),
                             };
-                            self.stack.push(memory.allocate_any(Box::new(record)))
+                            self.stack
+                                .offsets
+                                .push(Address(memory.allocate_any(Box::new(record))))
                         }
                         LoadTrait(layout) => {
                             let t = Trait {
                                 layout: layout.clone().into(),
                                 implementations: Default::default(),
                             };
-                            self.stack.push(memory.allocate_any(Box::new(t)))
+                            self.stack
+                                .offsets
+                                .push(Address(memory.allocate_any(Box::new(t))))
                         }
                         LoadInjection(key) => {
                             let Some(address) = loader.injections.get(key) else {
                                 anyhow::bail!("intrinsic {key} not found")
                             };
-                            self.stack.push(address.clone())
+                            self.stack.offsets.push(Address(address.clone()))
                         }
 
                         Set(i, source_i) => {
-                            let stack = &mut self.stack[frame.stack_offset..];
-                            match i.cmp(source_i) {
-                                Less => {
-                                    let (stack, remaining_stack) = stack.split_at_mut(*i + 1);
-                                    unsafe {
-                                        stack
-                                            .last_mut()
-                                            .unwrap()
-                                            .copy_from(&remaining_stack[source_i - i - 1])
-                                    }
+                            if let (Local(index), Local(source_index)) = (
+                                &self.stack.offsets[frame.stack_offset + *i],
+                                &self.stack.offsets[frame.stack_offset + *source_i],
+                            ) {
+                                self.stack.locals[*index] = self.stack.locals[*source_index]
+                            } else {
+                                // TODO optimize some single side local cases
+                                unsafe {
+                                    self.stack
+                                        .escape(frame.stack_offset + *i, memory)
+                                        .copy_from(
+                                            &self
+                                                .stack
+                                                .escape(frame.stack_offset + *source_i, memory),
+                                        )
                                 }
-                                Greater => {
-                                    let (stack, remaining_stack) =
-                                        stack.split_at_mut(*source_i + 1);
-                                    unsafe {
-                                        remaining_stack[i - source_i - 1]
-                                            .copy_from(stack.last().unwrap())
-                                    }
-                                }
-                                _ => {} // would be some silly case like `set x = x`
                             }
                         }
                         RecordGet(i, name) => {
-                            let record = unsafe { stack[*i].get_downcast_ref::<Record>() }?;
-                            self.stack.push(record.get_ref(name)?.clone())
+                            let record = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Record>(frame.stack_offset + *i)
+                            }?;
+                            self.stack
+                                .offsets
+                                .push(Address(record.get_ref(name)?.clone()))
                         }
                         RecordSet(i, name, j) => {
-                            let address = stack[*j].clone();
+                            let address = self.stack.escape(frame.stack_offset + *j, memory);
                             *unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_mut::<Record>()
+                                self.stack
+                                    .get_downcast_mut::<Record>(frame.stack_offset + *i)
                             }?
                             .get_mut(name)? = address
                         }
                         TypeGet(i, name) => {
-                            let t = unsafe { stack[*i].get_downcast_ref::<Type>() }?;
-                            let Some(address) = t.attributes.get(name) else {
+                            let Some(address) = unsafe {
+                                self.stack.get_downcast_ref::<Type>(frame.stack_offset + *i)
+                            }?
+                            .attributes
+                            .get(name) else {
                                 anyhow::bail!("there is no attribute {name} on type object")
                             };
-                            self.stack.push(address.clone())
+                            self.stack.offsets.push(Address(address.clone()))
                         }
                         TypeSet(i, name, j) => {
-                            let address = stack[*j].clone();
-                            let t = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_mut::<Type>()
-                            }?;
-                            let replaced = t.attributes.insert(name.clone(), address);
+                            let address = self.stack.escape(frame.stack_offset + *j, memory);
+                            let replaced = unsafe {
+                                self.stack.get_downcast_mut::<Type>(frame.stack_offset + *i)
+                            }?
+                            .attributes
+                            .insert(name.clone(), address);
                             anyhow::ensure!(
                                 replaced.is_none(),
                                 "duplicated setting attribute {name} on Type object"
                             )
                         }
                         TraitGet(i, implementor, name) => {
-                            let t = unsafe { stack[*i].get_downcast_ref::<Trait>() }?;
+                            let t = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Trait>(frame.stack_offset + *i)
+                            }?;
                             let Some(p) = t.layout.iter().position(|other_name| other_name == name)
                             else {
                                 anyhow::bail!("field `{name}` not found in trait layout")
                             };
                             let mut k = Vec::new();
                             for i in implementor {
-                                let t = unsafe { stack[*i].get_downcast_ref::<Type>() }?;
-                                k.push(t.id)
+                                let ty = unsafe {
+                                    self.stack.get_downcast_ref::<Type>(frame.stack_offset + *i)
+                                }?;
+                                k.push(ty.id)
                             }
                             let Some(addresses) = t.implementations.get(&k) else {
                                 anyhow::bail!("implementation not found")
                             };
-                            self.stack.push(addresses[p].clone())
+                            self.stack.offsets.push(Address(addresses[p].clone()))
                         }
                         Impl(i, implementor, fields) => {
-                            let t = unsafe { stack[*i].get_downcast_ref::<Trait>() }?;
+                            let t = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Trait>(frame.stack_offset + *i)
+                            }?;
                             let mut k = Vec::new();
                             for i in implementor {
-                                let t = unsafe { stack[*i].get_downcast_ref::<Type>() }?;
+                                let t = unsafe {
+                                    self.stack.get_downcast_ref::<Type>(frame.stack_offset + *i)
+                                }?;
                                 k.push(t.id)
                             }
-                            let mut addresses = Vec::new();
-                            for name in &*t.layout {
-                                let i = fields
+                            let offsets =
+                                t.layout
                                     .iter()
-                                    .find_map(
-                                        |(other_name, i)| {
-                                            if other_name == name {
-                                                Some(*i)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                    )
-                                    .ok_or(anyhow::format_err!(
-                                        "missing field `{name}` in trait implementation"
-                                    ))?;
-                                addresses.push(stack[i].clone())
-                            }
+                                    .map(|name| {
+                                        fields
+                                            .iter()
+                                            .find_map(|(other_name, i)| {
+                                                if other_name == name {
+                                                    Some(*i)
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .ok_or(anyhow::format_err!(
+                                                "missing field `{name}` in trait implementation"
+                                            ))
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                            let addresses = offsets
+                                .into_iter()
+                                .map(|i| self.stack.escape(frame.stack_offset + i, memory))
+                                .collect();
                             let replaced = unsafe {
-                                self.stack[frame.stack_offset + *i].get_downcast_mut::<Trait>()
+                                self.stack
+                                    .get_downcast_mut::<Trait>(frame.stack_offset + *i)
                             }
                             .unwrap()
                             .implementations
@@ -523,45 +536,140 @@ impl Machine {
                         }
 
                         Is(i, j) => {
-                            let r = unsafe { stack[*j].get_downcast_ref::<Type>() }?;
+                            let r = unsafe {
+                                self.stack.get_downcast_ref::<Type>(frame.stack_offset + *j)
+                            }?;
                             // TODO support other types
-                            let l = unsafe { stack[*i].get_downcast_ref::<Record>() }?;
-                            self.stack.push(memory.allocate_bool(l.type_id == r.id))
+                            let l = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Record>(frame.stack_offset + *i)
+                            }?;
+                            self.stack
+                                .push_local(crate::machine::Local::Bool(l.type_id == r.id))
                         }
                         IntOperator2(op, i, j) => {
-                            let l = unsafe { stack[*i].get_int() }?;
-                            let r = unsafe { stack[*j].get_int() }?;
+                            let l = unsafe { self.stack.get_int(frame.stack_offset + *i) }?;
+                            let r = unsafe { self.stack.get_int(frame.stack_offset + *j) }?;
                             tracing::debug!("  {op:?} {l} {r}");
-                            use NumericalOperator2::*;
-                            let address = match op {
-                                Add => memory.allocate_int(l + r),
-                                Sub => memory.allocate_int(l - r),
-                                Equal => memory.allocate_bool(l == r),
-                                NotEqual => memory.allocate_bool(l != r),
-                                Less => memory.allocate_bool(l < r),
-                                LessEqual => memory.allocate_bool(l <= r),
-                                Greater => memory.allocate_bool(l > r),
-                                GreaterEqual => memory.allocate_bool(l >= r),
+                            use {crate::machine::Local::*, NumericalOperator2::*};
+                            let local = match op {
+                                Add => Int(l + r),
+                                Sub => Int(l - r),
+                                Equal => Bool(l == r),
+                                NotEqual => Bool(l != r),
+                                Less => Bool(l < r),
+                                LessEqual => Bool(l <= r),
+                                Greater => Bool(l > r),
+                                GreaterEqual => Bool(l >= r),
                             };
-                            self.stack.push(address)
+                            self.stack.push_local(local)
                         }
                         BitwiseOperator2(op, i, j) => {
-                            let l = unsafe { stack[*i].get_int() }?;
-                            let r = unsafe { stack[*j].get_int() }?;
-                            use crate::machine::BitwiseOperator2::*;
-                            let address = match op {
-                                And => memory.allocate_int(l & r),
-                                Or => memory.allocate_int(l | r),
-                                ShiftLeft => memory.allocate_int(l << r),
-                                ShiftRight => memory.allocate_int(l >> r),
+                            let l = unsafe { self.stack.get_int(frame.stack_offset + *i) }?;
+                            let r = unsafe { self.stack.get_int(frame.stack_offset + *j) }?;
+                            use crate::machine::{BitwiseOperator2::*, Local::*};
+                            let local = match op {
+                                And => Int(l & r),
+                                Or => Int(l | r),
+                                ShiftLeft => Int(l << r),
+                                ShiftRight => Int(l >> r),
                             };
-                            self.stack.push(address)
+                            self.stack.push_local(local)
                         }
                     }
                 }
                 anyhow::bail!("Code instructions not end with Return")
             }
         }
+    }
+}
+
+impl Stack {
+    fn push_local(&mut self, local: Local) {
+        let index = self.locals.len();
+        self.locals.push(local);
+        self.offsets.push(StackVariable::Local(index))
+    }
+
+    fn escape(&mut self, i: usize, memory: &mut Memory) -> Address {
+        let variable = &mut self.offsets[i];
+        match variable {
+            StackVariable::Address(address) => address.clone(),
+            StackVariable::Local(index) => {
+                let address = match &self.locals[*index] {
+                    Local::Unit => memory.allocate_unit(),
+                    Local::Bool(b) => memory.allocate_bool(*b),
+                    Local::Int(int) => memory.allocate_int(*int),
+                };
+                *variable = StackVariable::Address(address.clone());
+                address
+            }
+        }
+    }
+
+    unsafe fn get_unit(&self, i: usize) -> anyhow::Result<()> {
+        match &self.offsets[i] {
+            StackVariable::Address(address) => unsafe { address.get_unit() },
+            StackVariable::Local(index) => {
+                let Local::Unit = &self.locals[*index] else {
+                    anyhow::bail!(TypeError {
+                        expected: "bool",
+                        content: format!("{:?}", self.offsets[i])
+                    })
+                };
+                Ok(())
+            }
+        }
+    }
+
+    unsafe fn get_bool(&self, i: usize) -> anyhow::Result<bool> {
+        match &self.offsets[i] {
+            StackVariable::Address(address) => unsafe { address.get_bool() },
+            StackVariable::Local(index) => {
+                let Local::Bool(b) = &self.locals[*index] else {
+                    anyhow::bail!(TypeError {
+                        expected: "bool",
+                        content: format!("{:?}", self.offsets[i])
+                    })
+                };
+                Ok(*b)
+            }
+        }
+    }
+
+    unsafe fn get_int(&self, i: usize) -> anyhow::Result<i32> {
+        match &self.offsets[i] {
+            StackVariable::Address(address) => unsafe { address.get_int() },
+            StackVariable::Local(index) => {
+                let Local::Int(int) = &self.locals[*index] else {
+                    anyhow::bail!(TypeError {
+                        expected: "int",
+                        content: format!("{:?}", self.offsets[i])
+                    })
+                };
+                Ok(*int)
+            }
+        }
+    }
+
+    unsafe fn get_downcast_ref<T: 'static>(&self, i: usize) -> anyhow::Result<&T> {
+        let StackVariable::Address(address) = &self.offsets[i] else {
+            anyhow::bail!(TypeError {
+                expected: type_name::<T>(),
+                content: format!("{:?}", self.offsets[i])
+            })
+        };
+        address.get_downcast_ref()
+    }
+
+    unsafe fn get_downcast_mut<T: 'static>(&self, i: usize) -> anyhow::Result<&mut T> {
+        let StackVariable::Address(address) = &self.offsets[i] else {
+            anyhow::bail!(TypeError {
+                expected: type_name::<T>(),
+                content: format!("{:?}", self.offsets[i])
+            })
+        };
+        address.get_downcast_mut()
     }
 }
 
