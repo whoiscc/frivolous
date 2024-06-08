@@ -61,7 +61,7 @@ impl Loader {
         &mut self,
         memory: &mut Memory,
         key: &str,
-        num_parameter: usize,
+        num_parameter: u8,
         function: unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>,
     ) {
         let address = memory.allocate_any(Box::new(Code::new_native(

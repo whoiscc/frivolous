@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub type CodeId = usize;
-pub type StackOffset = usize;
+pub type StackOffset = u8;
 pub type InstructionOffset = usize;
 
 #[derive(Debug)]
@@ -16,6 +16,36 @@ pub enum Instruction {
     LoadUnit,
     LoadBool(bool),
     LoadInt(i32),
+
+    IntOperator2(NumericalOperator2, StackOffset, StackOffset),
+    BitwiseOperator2(BitwiseOperator2, StackOffset, StackOffset),
+
+    Set(StackOffset, StackOffset),
+    // copy current offset to the index, reset current offset to the index
+    Rewind(StackOffset),
+
+    Jump(InstructionOffset),
+    JumpUnless(StackOffset, InstructionOffset),
+
+    Call(StackOffset, Box<[StackOffset; 16]>, u8),
+    Return(StackOffset),
+
+    Extended(Box<ExtendedInstruction>),
+}
+
+impl Instruction {
+    pub fn call(code: StackOffset, args_i: Vec<StackOffset>) -> Self {
+        let mut call_args_i = Box::<[_; 16]>::default();
+        let num_arg = args_i.len() as _;
+        for (i, source_i) in call_args_i.iter_mut().zip(args_i) {
+            *i = source_i
+        }
+        Self::Call(code, call_args_i, num_arg)
+    }
+}
+
+#[derive(Debug)]
+pub enum ExtendedInstruction {
     LoadString(String),
     LoadFunction(Box<InstructionFunction>, Vec<StackOffset>),
     LoadLayout(Vec<String>),
@@ -24,33 +54,27 @@ pub enum Instruction {
     LoadTrait(Vec<String>),
     LoadInjection(String),
 
-    // copy current offset to the index, reset current offset to the index
-    Rewind(StackOffset),
-
     RecordGet(StackOffset, String),
     TypeGet(StackOffset, String),
     TraitGet(StackOffset, Vec<StackOffset>, String), // (trait, impl types, name)
-    IntOperator2(NumericalOperator2, StackOffset, StackOffset),
-    BitwiseOperator2(BitwiseOperator2, StackOffset, StackOffset),
     Is(StackOffset, StackOffset),
 
-    Set(StackOffset, StackOffset),
     RecordSet(StackOffset, String, StackOffset),
     TypeSet(StackOffset, String, StackOffset),
     Impl(StackOffset, Vec<StackOffset>, Vec<(String, StackOffset)>),
+}
 
-    Jump(InstructionOffset),
-    JumpUnless(StackOffset, InstructionOffset),
-
-    Call(StackOffset, Vec<StackOffset>),
-    Return(StackOffset),
+impl From<ExtendedInstruction> for Instruction {
+    fn from(value: ExtendedInstruction) -> Self {
+        Self::Extended(Box::new(value))
+    }
 }
 
 #[derive(Debug)]
 pub struct InstructionFunction {
     pub hints: String,
-    pub num_capture: usize,
-    pub num_parameter: usize,
+    pub num_capture: u8,
+    pub num_parameter: u8,
     pub id: InterpretedCodeId,
 }
 
@@ -83,12 +107,12 @@ pub struct Machine {
 
 #[derive(Debug, Default)]
 struct Stack {
-    offsets: Vec<StackVariable>,
+    variables: Vec<Variable>,
     locals: Vec<Local>,
 }
 
 #[derive(Debug, Clone)]
-enum StackVariable {
+enum Variable {
     Address(Address),
     Local(usize),
 }
@@ -102,9 +126,9 @@ enum Local {
 
 #[derive(Debug)]
 struct Frame {
-    code_offset: StackOffset,
+    code_offset: usize,
     code_id: InterpretedCodeId,
-    stack_offset: StackOffset,
+    variable_offset: usize,
     instruction_offset: InstructionOffset,
     local_offset: usize,
 }
@@ -120,7 +144,7 @@ impl Machine {
         memory: &mut Memory,
         loader: &Loader,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.stack.offsets.is_empty());
+        anyhow::ensure!(self.stack.variables.is_empty());
         assert!(self.stack.locals.is_empty());
         anyhow::ensure!(self.frames.is_empty());
         let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
@@ -129,18 +153,18 @@ impl Machine {
             anyhow::bail!("unsupported native code entry")
         };
         let code_id = source.id;
-        self.stack.offsets.extend(
+        self.stack.variables.extend(
             source
                 .captures
                 .iter()
-                .map(|address| StackVariable::Address(address.clone())),
+                .map(|address| Variable::Address(address.clone())),
         );
         self.stack
-            .offsets
-            .insert(0, StackVariable::Address(code_address));
+            .variables
+            .insert(0, Variable::Address(code_address));
         let frame = Frame {
             code_offset: 0,
-            stack_offset: 1,
+            variable_offset: 1,
             instruction_offset: 0,
             local_offset: 0,
             code_id,
@@ -168,7 +192,7 @@ impl Display for BacktraceLine {
 
 impl Frame {
     unsafe fn backtrace_line(&self, stack: &Stack) -> BacktraceLine {
-        let code = unsafe { stack.get_downcast_ref::<Code>(self.code_offset) }.unwrap();
+        let code = unsafe { stack.get_downcast_ref::<Code>(self.code_offset as _) }.unwrap();
         BacktraceLine {
             code_hints: code.hints.clone(),
             instruction_offset: self.instruction_offset,
@@ -213,61 +237,67 @@ impl Machine {
                 for instruction in &instructions[frame.instruction_offset..] {
                     tracing::trace!("{instruction:?}");
                     frame.instruction_offset += 1;
-                    use {Instruction::*, StackVariable::*};
+                    use {ExtendedInstruction::*, Instruction::*, Variable::*};
                     match instruction {
                         Jump(offset) => {
                             frame.instruction_offset = *offset;
                             continue 'local_jump;
                         }
                         JumpUnless(i, offset) => {
-                            if !unsafe { self.stack.get_bool(frame.stack_offset + *i) }? {
+                            if !unsafe { self.stack.get_bool(frame.variable_offset + *i as usize) }?
+                            {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
                         }
-                        Call(code_i, args_i) => {
-                            let StackVariable::Address(code_address) =
-                                self.stack.offsets[frame.stack_offset + *code_i].clone()
+                        Call(code_i, args_i, num_arg) => {
+                            let Address(code_address) = self.stack.variables
+                                [frame.variable_offset + *code_i as usize]
+                                .clone()
                             else {
                                 anyhow::bail!(TypeError {
                                     expected: type_name::<Code>(),
                                     content: format!(
                                         "{:?}",
-                                        self.stack.offsets[frame.stack_offset + *code_i]
+                                        self.stack.variables
+                                            [frame.variable_offset + *code_i as usize]
                                     )
                                 })
                             };
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
-                            anyhow::ensure!(args_i.len() == code.num_parameter);
+                            anyhow::ensure!(*num_arg == code.num_parameter);
                             match &code.source {
                                 &CodeSource::Native(function) => {
                                     let arguments = args_i
                                         .iter()
-                                        .map(|i| self.stack.escape(frame.stack_offset + *i, memory))
+                                        .map(|i| {
+                                            self.stack
+                                                .escape(frame.variable_offset + *i as usize, memory)
+                                        })
                                         .collect::<Vec<_>>();
                                     let address = unsafe { function(&arguments, memory) }?;
-                                    self.stack.offsets.push(Address(address))
+                                    self.stack.variables.push(Address(address))
                                 }
                                 CodeSource::Interpreted(source) => {
-                                    let stack_offset = self.stack.offsets.len();
+                                    let stack_offset = self.stack.variables.len();
                                     let local_offset = self.stack.locals.len();
                                     let code_id = source.id;
 
                                     for address in &source.captures {
-                                        self.stack
-                                            .offsets
-                                            .push(StackVariable::Address(address.clone()))
+                                        self.stack.variables.push(Address(address.clone()))
                                     }
-                                    for i in args_i {
-                                        self.stack.offsets.push(
-                                            self.stack.offsets[frame.stack_offset + *i].clone(),
+                                    for i in &args_i[..*num_arg as usize] {
+                                        self.stack.variables.push(
+                                            self.stack.variables
+                                                [frame.variable_offset + *i as usize]
+                                                .clone(),
                                         )
                                     }
 
                                     let frame = Frame {
                                         code_id,
-                                        code_offset: frame.stack_offset + *code_i,
-                                        stack_offset,
+                                        code_offset: frame.variable_offset + *code_i as usize,
+                                        variable_offset: stack_offset as _,
                                         instruction_offset: 0,
                                         local_offset,
                                     };
@@ -279,8 +309,9 @@ impl Machine {
                         Return(i) => {
                             let popped_frame = self.frames.pop().unwrap();
                             if !self.frames.is_empty() {
-                                let mut variable =
-                                    self.stack.offsets[popped_frame.stack_offset + *i].clone();
+                                let mut variable = self.stack.variables
+                                    [popped_frame.variable_offset + *i as usize]
+                                    .clone();
                                 let mut locals_len = popped_frame.local_offset;
                                 if let Local(index) = variable {
                                     if index >= locals_len {
@@ -289,83 +320,114 @@ impl Machine {
                                         locals_len += 1;
                                     }
                                 }
-                                self.stack.offsets.truncate(popped_frame.stack_offset);
-                                self.stack.offsets.push(variable);
+                                self.stack.variables.truncate(popped_frame.variable_offset);
+                                self.stack.variables.push(variable);
                                 self.stack.locals.truncate(locals_len);
                                 continue 'nonlocal_jump;
                             } else {
-                                unsafe { self.stack.get_unit(popped_frame.stack_offset + *i) }?;
-                                self.stack.offsets.clear();
+                                unsafe {
+                                    self.stack
+                                        .get_unit(popped_frame.variable_offset + *i as usize)
+                                }?;
+                                self.stack.variables.clear();
                                 self.stack.locals.clear();
                                 return Ok(());
                             };
                         }
 
+                        Set(i, source_i) => {
+                            if let (Local(index), Local(source_index)) = (
+                                &self.stack.variables[frame.variable_offset + *i as usize],
+                                &self.stack.variables[frame.variable_offset + *source_i as usize],
+                            ) {
+                                self.stack.locals[*index] = self.stack.locals[*source_index]
+                            } else {
+                                // TODO optimize some single side local cases
+                                unsafe {
+                                    self.stack
+                                        .escape(frame.variable_offset + *i as usize, memory)
+                                        .copy_from(&self.stack.escape(
+                                            frame.variable_offset + *source_i as usize,
+                                            memory,
+                                        ))
+                                }
+                            }
+                        }
+
                         Rewind(i) => {
-                            anyhow::ensure!(self.stack.offsets.len() >= *i);
-                            let variable = self.stack.offsets.pop().unwrap();
+                            anyhow::ensure!(self.stack.variables.len() >= *i as _);
+                            let variable = self.stack.variables.pop().unwrap();
                             self.stack
-                                .offsets
-                                .splice(frame.stack_offset + *i.., [variable]);
+                                .variables
+                                .splice(frame.variable_offset + *i as usize.., [variable]);
                         }
 
                         LoadUnit => self.stack.push_local(crate::machine::Local::Unit),
                         LoadBool(b) => self.stack.push_local(crate::machine::Local::Bool(*b)),
                         LoadInt(int) => self.stack.push_local(crate::machine::Local::Int(*int)),
-                        LoadString(string) => self
-                            .stack
-                            .offsets
-                            .push(Address(memory.allocate_any(Box::new(string.clone())))),
-                        LoadFunction(function, captures_i) => {
-                            anyhow::ensure!(captures_i.len() == function.num_capture);
-                            let captures = captures_i
-                                .iter()
-                                .map(|i| self.stack.escape(frame.stack_offset + *i, memory))
-                                .collect();
-                            self.stack
-                                .offsets
-                                .push(Address(memory.allocate_any(Box::new(
-                                    Code::new_interpreted(function, captures)?,
-                                ))))
-                        }
-                        LoadLayout(layout) => self.stack.offsets.push(Address(
-                            memory.allocate_any(Box::new(RecordLayout(layout.clone().into()))),
-                        )),
-                        LoadType(layout_i) => {
-                            self.type_id_counter += 1;
-                            let t = Type {
-                                id: self.type_id_counter,
-                                layout_address: layout_i
-                                    .map(|i| self.stack.escape(frame.stack_offset + i, memory)),
-                                attributes: Default::default(),
-                            };
-                            self.stack
-                                .offsets
-                                .push(Address(memory.allocate_any(Box::new(t))))
-                        }
-                        LoadRecord(type_i, variants, fields) => {
-                            let mut t = unsafe {
+
+                        Extended(instruction) => match &**instruction {
+                            LoadString(string) => self
+                                .stack
+                                .variables
+                                .push(Address(memory.allocate_any(Box::new(string.clone())))),
+                            LoadFunction(function, captures_i) => {
+                                anyhow::ensure!(captures_i.len() == function.num_capture as _);
+                                let captures = captures_i
+                                    .iter()
+                                    .map(|i| {
+                                        self.stack
+                                            .escape(frame.variable_offset + *i as usize, memory)
+                                    })
+                                    .collect();
                                 self.stack
-                                    .get_downcast_ref::<Type>(frame.stack_offset + *type_i)
-                            }?;
-                            for variant in variants {
+                                    .variables
+                                    .push(Address(memory.allocate_any(Box::new(
+                                        Code::new_interpreted(function, captures)?,
+                                    ))))
+                            }
+                            LoadLayout(layout) => self.stack.variables.push(Address(
+                                memory.allocate_any(Box::new(RecordLayout(layout.clone().into()))),
+                            )),
+                            LoadType(layout_i) => {
+                                self.type_id_counter += 1;
+                                let t = Type {
+                                    id: self.type_id_counter,
+                                    layout_address: layout_i.map(|i| {
+                                        self.stack
+                                            .escape(frame.variable_offset + i as usize, memory)
+                                    }),
+                                    attributes: Default::default(),
+                                };
+                                self.stack
+                                    .variables
+                                    .push(Address(memory.allocate_any(Box::new(t))))
+                            }
+                            LoadRecord(type_i, variants, fields) => {
+                                let mut t = unsafe {
+                                    self.stack.get_downcast_ref::<Type>(
+                                        frame.variable_offset + *type_i as usize,
+                                    )
+                                }?;
+                                for variant in variants {
+                                    let Some(layout_address) = &t.layout_address else {
+                                        anyhow::bail!(
+                                            "attempting to construct record for native type"
+                                        )
+                                    };
+                                    t = unsafe {
+                                        layout_address
+                                            .get_downcast_ref::<Record>()?
+                                            .get_ref(variant)?
+                                            .get_downcast_ref()
+                                    }?
+                                }
                                 let Some(layout_address) = &t.layout_address else {
                                     anyhow::bail!("attempting to construct record for native type")
                                 };
-                                t = unsafe {
-                                    layout_address
-                                        .get_downcast_ref::<Record>()?
-                                        .get_ref(variant)?
-                                        .get_downcast_ref()
-                                }?
-                            }
-                            let Some(layout_address) = &t.layout_address else {
-                                anyhow::bail!("attempting to construct record for native type")
-                            };
-                            let RecordLayout(layout) =
-                                unsafe { layout_address.get_downcast_ref() }?;
-                            let offsets =
-                                layout
+                                let RecordLayout(layout) =
+                                    unsafe { layout_address.get_downcast_ref() }?;
+                                let offsets = layout
                                     .iter()
                                     .map(|name| {
                                         fields
@@ -382,127 +444,128 @@ impl Machine {
                                             ))
                                     })
                                     .collect::<Result<Vec<_>, _>>()?;
-                            let record = Record {
-                                type_id: t.id,
-                                layout: layout.clone(),
-                                addresses: offsets
-                                    .into_iter()
-                                    .map(|i| self.stack.escape(frame.stack_offset + i, memory))
-                                    .collect(),
-                            };
-                            self.stack
-                                .offsets
-                                .push(Address(memory.allocate_any(Box::new(record))))
-                        }
-                        LoadTrait(layout) => {
-                            let t = Trait {
-                                layout: layout.clone().into(),
-                                implementations: Default::default(),
-                            };
-                            self.stack
-                                .offsets
-                                .push(Address(memory.allocate_any(Box::new(t))))
-                        }
-                        LoadInjection(key) => {
-                            let Some(address) = loader.injections.get(key) else {
-                                anyhow::bail!("intrinsic {key} not found")
-                            };
-                            self.stack.offsets.push(Address(address.clone()))
-                        }
+                                let record = Record {
+                                    type_id: t.id,
+                                    layout: layout.clone(),
+                                    addresses: offsets
+                                        .into_iter()
+                                        .map(|i| {
+                                            self.stack
+                                                .escape(frame.variable_offset + i as usize, memory)
+                                        })
+                                        .collect(),
+                                };
+                                self.stack
+                                    .variables
+                                    .push(Address(memory.allocate_any(Box::new(record))))
+                            }
+                            LoadTrait(layout) => {
+                                let t = Trait {
+                                    layout: layout.clone().into(),
+                                    implementations: Default::default(),
+                                };
+                                self.stack
+                                    .variables
+                                    .push(Address(memory.allocate_any(Box::new(t))))
+                            }
+                            LoadInjection(key) => {
+                                let Some(address) = loader.injections.get(key) else {
+                                    anyhow::bail!("intrinsic {key} not found")
+                                };
+                                self.stack.variables.push(Address(address.clone()))
+                            }
 
-                        Set(i, source_i) => {
-                            if let (Local(index), Local(source_index)) = (
-                                &self.stack.offsets[frame.stack_offset + *i],
-                                &self.stack.offsets[frame.stack_offset + *source_i],
-                            ) {
-                                self.stack.locals[*index] = self.stack.locals[*source_index]
-                            } else {
-                                // TODO optimize some single side local cases
-                                unsafe {
-                                    self.stack
-                                        .escape(frame.stack_offset + *i, memory)
-                                        .copy_from(
-                                            &self
-                                                .stack
-                                                .escape(frame.stack_offset + *source_i, memory),
-                                        )
-                                }
-                            }
-                        }
-                        RecordGet(i, name) => {
-                            let record = unsafe {
-                                self.stack
-                                    .get_downcast_ref::<Record>(frame.stack_offset + *i)
-                            }?;
-                            self.stack
-                                .offsets
-                                .push(Address(record.get_ref(name)?.clone()))
-                        }
-                        RecordSet(i, name, j) => {
-                            let address = self.stack.escape(frame.stack_offset + *j, memory);
-                            *unsafe {
-                                self.stack
-                                    .get_downcast_mut::<Record>(frame.stack_offset + *i)
-                            }?
-                            .get_mut(name)? = address
-                        }
-                        TypeGet(i, name) => {
-                            let Some(address) = unsafe {
-                                self.stack.get_downcast_ref::<Type>(frame.stack_offset + *i)
-                            }?
-                            .attributes
-                            .get(name) else {
-                                anyhow::bail!("there is no attribute {name} on type object")
-                            };
-                            self.stack.offsets.push(Address(address.clone()))
-                        }
-                        TypeSet(i, name, j) => {
-                            let address = self.stack.escape(frame.stack_offset + *j, memory);
-                            let replaced = unsafe {
-                                self.stack.get_downcast_mut::<Type>(frame.stack_offset + *i)
-                            }?
-                            .attributes
-                            .insert(name.clone(), address);
-                            anyhow::ensure!(
-                                replaced.is_none(),
-                                "duplicated setting attribute {name} on Type object"
-                            )
-                        }
-                        TraitGet(i, implementor, name) => {
-                            let t = unsafe {
-                                self.stack
-                                    .get_downcast_ref::<Trait>(frame.stack_offset + *i)
-                            }?;
-                            let Some(p) = t.layout.iter().position(|other_name| other_name == name)
-                            else {
-                                anyhow::bail!("field `{name}` not found in trait layout")
-                            };
-                            let mut k = Vec::new();
-                            for i in implementor {
-                                let ty = unsafe {
-                                    self.stack.get_downcast_ref::<Type>(frame.stack_offset + *i)
+                            RecordGet(i, name) => {
+                                let record = unsafe {
+                                    self.stack.get_downcast_ref::<Record>(
+                                        frame.variable_offset + *i as usize,
+                                    )
                                 }?;
-                                k.push(ty.id)
-                            }
-                            let Some(addresses) = t.implementations.get(&k) else {
-                                anyhow::bail!("implementation not found")
-                            };
-                            self.stack.offsets.push(Address(addresses[p].clone()))
-                        }
-                        Impl(i, implementor, fields) => {
-                            let t = unsafe {
                                 self.stack
-                                    .get_downcast_ref::<Trait>(frame.stack_offset + *i)
-                            }?;
-                            let mut k = Vec::new();
-                            for i in implementor {
+                                    .variables
+                                    .push(Address(record.get_ref(name)?.clone()))
+                            }
+                            RecordSet(i, name, j) => {
+                                let address = self
+                                    .stack
+                                    .escape(frame.variable_offset + *j as usize, memory);
+                                *unsafe {
+                                    self.stack.get_downcast_mut::<Record>(
+                                        frame.variable_offset + *i as usize,
+                                    )
+                                }?
+                                .get_mut(name)? = address
+                            }
+                            TypeGet(i, name) => {
+                                let Some(address) = unsafe {
+                                    self.stack.get_downcast_ref::<Type>(
+                                        frame.variable_offset + *i as usize,
+                                    )
+                                }?
+                                .attributes
+                                .get(name) else {
+                                    anyhow::bail!("there is no attribute {name} on type object")
+                                };
+                                self.stack.variables.push(Address(address.clone()))
+                            }
+                            TypeSet(i, name, j) => {
+                                let address = self
+                                    .stack
+                                    .escape(frame.variable_offset + *j as usize, memory);
+                                let replaced = unsafe {
+                                    self.stack.get_downcast_mut::<Type>(
+                                        frame.variable_offset + *i as usize,
+                                    )
+                                }?
+                                .attributes
+                                .insert(name.clone(), address);
+                                anyhow::ensure!(
+                                    replaced.is_none(),
+                                    "duplicated setting attribute {name} on Type object"
+                                )
+                            }
+                            TraitGet(i, implementor, name) => {
                                 let t = unsafe {
-                                    self.stack.get_downcast_ref::<Type>(frame.stack_offset + *i)
+                                    self.stack.get_downcast_ref::<Trait>(
+                                        frame.variable_offset + *i as usize,
+                                    )
                                 }?;
-                                k.push(t.id)
+                                let Some(p) =
+                                    t.layout.iter().position(|other_name| other_name == name)
+                                else {
+                                    anyhow::bail!("field `{name}` not found in trait layout")
+                                };
+                                let mut k = Vec::new();
+                                for i in implementor {
+                                    let ty = unsafe {
+                                        self.stack.get_downcast_ref::<Type>(
+                                            frame.variable_offset + *i as usize,
+                                        )
+                                    }?;
+                                    k.push(ty.id)
+                                }
+                                let Some(addresses) = t.implementations.get(&k) else {
+                                    anyhow::bail!("implementation not found")
+                                };
+                                self.stack.variables.push(Address(addresses[p].clone()))
                             }
-                            let offsets =
-                                t.layout
+                            Impl(i, implementor, fields) => {
+                                let t = unsafe {
+                                    self.stack.get_downcast_ref::<Trait>(
+                                        frame.variable_offset + *i as usize,
+                                    )
+                                }?;
+                                let mut k = Vec::new();
+                                for i in implementor {
+                                    let t = unsafe {
+                                        self.stack.get_downcast_ref::<Type>(
+                                            frame.variable_offset + *i as usize,
+                                        )
+                                    }?;
+                                    k.push(t.id)
+                                }
+                                let offsets = t
+                                    .layout
                                     .iter()
                                     .map(|name| {
                                         fields
@@ -519,38 +582,49 @@ impl Machine {
                                             ))
                                     })
                                     .collect::<Result<Vec<_>, _>>()?;
-                            let addresses = offsets
-                                .into_iter()
-                                .map(|i| self.stack.escape(frame.stack_offset + i, memory))
-                                .collect();
-                            let replaced = unsafe {
-                                self.stack
-                                    .get_downcast_mut::<Trait>(frame.stack_offset + *i)
+                                let addresses = offsets
+                                    .into_iter()
+                                    .map(|i| {
+                                        self.stack
+                                            .escape(frame.variable_offset + i as usize, memory)
+                                    })
+                                    .collect();
+                                let replaced = unsafe {
+                                    self.stack.get_downcast_mut::<Trait>(
+                                        frame.variable_offset + *i as usize,
+                                    )
+                                }
+                                .unwrap()
+                                .implementations
+                                .insert(k, addresses);
+                                anyhow::ensure!(
+                                    replaced.is_none(),
+                                    "duplicated implementation of trait"
+                                )
                             }
-                            .unwrap()
-                            .implementations
-                            .insert(k, addresses);
-                            anyhow::ensure!(
-                                replaced.is_none(),
-                                "duplicated implementation of trait"
-                            )
-                        }
 
-                        Is(i, j) => {
-                            let r = unsafe {
-                                self.stack.get_downcast_ref::<Type>(frame.stack_offset + *j)
-                            }?;
-                            // TODO support other types
-                            let l = unsafe {
+                            Is(i, j) => {
+                                let r = unsafe {
+                                    self.stack.get_downcast_ref::<Type>(
+                                        frame.variable_offset + *j as usize,
+                                    )
+                                }?;
+                                // TODO support other types
+                                let l = unsafe {
+                                    self.stack.get_downcast_ref::<Record>(
+                                        frame.variable_offset + *i as usize,
+                                    )
+                                }?;
                                 self.stack
-                                    .get_downcast_ref::<Record>(frame.stack_offset + *i)
-                            }?;
-                            self.stack
-                                .push_local(crate::machine::Local::Bool(l.type_id == r.id))
-                        }
+                                    .push_local(crate::machine::Local::Bool(l.type_id == r.id))
+                            }
+                        },
+
                         IntOperator2(op, i, j) => {
-                            let l = unsafe { self.stack.get_int(frame.stack_offset + *i) }?;
-                            let r = unsafe { self.stack.get_int(frame.stack_offset + *j) }?;
+                            let l =
+                                unsafe { self.stack.get_int(frame.variable_offset + *i as usize) }?;
+                            let r =
+                                unsafe { self.stack.get_int(frame.variable_offset + *j as usize) }?;
                             tracing::debug!("  {op:?} {l} {r}");
                             use {crate::machine::Local::*, NumericalOperator2::*};
                             let local = match op {
@@ -566,8 +640,10 @@ impl Machine {
                             self.stack.push_local(local)
                         }
                         BitwiseOperator2(op, i, j) => {
-                            let l = unsafe { self.stack.get_int(frame.stack_offset + *i) }?;
-                            let r = unsafe { self.stack.get_int(frame.stack_offset + *j) }?;
+                            let l =
+                                unsafe { self.stack.get_int(frame.variable_offset + *i as usize) }?;
+                            let r =
+                                unsafe { self.stack.get_int(frame.variable_offset + *j as usize) }?;
                             use crate::machine::{BitwiseOperator2::*, Local::*};
                             let local = match op {
                                 And => Int(l & r),
@@ -589,33 +665,33 @@ impl Stack {
     fn push_local(&mut self, local: Local) {
         let index = self.locals.len();
         self.locals.push(local);
-        self.offsets.push(StackVariable::Local(index))
+        self.variables.push(Variable::Local(index))
     }
 
     fn escape(&mut self, i: usize, memory: &mut Memory) -> Address {
-        let variable = &mut self.offsets[i];
+        let variable = &mut self.variables[i];
         match variable {
-            StackVariable::Address(address) => address.clone(),
-            StackVariable::Local(index) => {
+            Variable::Address(address) => address.clone(),
+            Variable::Local(index) => {
                 let address = match &self.locals[*index] {
                     Local::Unit => memory.allocate_unit(),
                     Local::Bool(b) => memory.allocate_bool(*b),
                     Local::Int(int) => memory.allocate_int(*int),
                 };
-                *variable = StackVariable::Address(address.clone());
+                *variable = Variable::Address(address.clone());
                 address
             }
         }
     }
 
     unsafe fn get_unit(&self, i: usize) -> anyhow::Result<()> {
-        match &self.offsets[i] {
-            StackVariable::Address(address) => unsafe { address.get_unit() },
-            StackVariable::Local(index) => {
+        match &self.variables[i] {
+            Variable::Address(address) => unsafe { address.get_unit() },
+            Variable::Local(index) => {
                 let Local::Unit = &self.locals[*index] else {
                     anyhow::bail!(TypeError {
                         expected: "bool",
-                        content: format!("{:?}", self.offsets[i])
+                        content: format!("{:?}", self.variables[i])
                     })
                 };
                 Ok(())
@@ -624,13 +700,13 @@ impl Stack {
     }
 
     unsafe fn get_bool(&self, i: usize) -> anyhow::Result<bool> {
-        match &self.offsets[i] {
-            StackVariable::Address(address) => unsafe { address.get_bool() },
-            StackVariable::Local(index) => {
+        match &self.variables[i] {
+            Variable::Address(address) => unsafe { address.get_bool() },
+            Variable::Local(index) => {
                 let Local::Bool(b) = &self.locals[*index] else {
                     anyhow::bail!(TypeError {
                         expected: "bool",
-                        content: format!("{:?}", self.offsets[i])
+                        content: format!("{:?}", self.variables[i])
                     })
                 };
                 Ok(*b)
@@ -639,13 +715,13 @@ impl Stack {
     }
 
     unsafe fn get_int(&self, i: usize) -> anyhow::Result<i32> {
-        match &self.offsets[i] {
-            StackVariable::Address(address) => unsafe { address.get_int() },
-            StackVariable::Local(index) => {
+        match &self.variables[i] {
+            Variable::Address(address) => unsafe { address.get_int() },
+            Variable::Local(index) => {
                 let Local::Int(int) = &self.locals[*index] else {
                     anyhow::bail!(TypeError {
                         expected: "int",
-                        content: format!("{:?}", self.offsets[i])
+                        content: format!("{:?}", self.variables[i])
                     })
                 };
                 Ok(*int)
@@ -654,20 +730,20 @@ impl Stack {
     }
 
     unsafe fn get_downcast_ref<T: 'static>(&self, i: usize) -> anyhow::Result<&T> {
-        let StackVariable::Address(address) = &self.offsets[i] else {
+        let Variable::Address(address) = &self.variables[i] else {
             anyhow::bail!(TypeError {
                 expected: type_name::<T>(),
-                content: format!("{:?}", self.offsets[i])
+                content: format!("{:?}", self.variables[i])
             })
         };
         address.get_downcast_ref()
     }
 
     unsafe fn get_downcast_mut<T: 'static>(&self, i: usize) -> anyhow::Result<&mut T> {
-        let StackVariable::Address(address) = &self.offsets[i] else {
+        let Variable::Address(address) = &self.variables[i] else {
             anyhow::bail!(TypeError {
                 expected: type_name::<T>(),
-                content: format!("{:?}", self.offsets[i])
+                content: format!("{:?}", self.variables[i])
             })
         };
         address.get_downcast_mut()
@@ -677,7 +753,7 @@ impl Stack {
 #[derive(Debug)]
 pub struct Code {
     hints: String,
-    num_parameter: usize,
+    num_parameter: u8,
     source: CodeSource,
 }
 
@@ -698,7 +774,7 @@ impl Code {
         function: &InstructionFunction,
         captures: Vec<Address>,
     ) -> anyhow::Result<Self> {
-        anyhow::ensure!(captures.len() == function.num_capture);
+        anyhow::ensure!(captures.len() == function.num_capture as _);
         Ok(Self {
             hints: function.hints.clone(),
             num_parameter: function.num_parameter,
@@ -711,7 +787,7 @@ impl Code {
 
     pub fn new_native(
         hints: String,
-        num_parameter: usize,
+        num_parameter: u8,
         function: unsafe fn(&[Address], &mut Memory) -> anyhow::Result<Address>,
     ) -> Self {
         Self {

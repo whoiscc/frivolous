@@ -18,7 +18,11 @@ fn main() -> anyhow::Result<()> {
     let mut loader = Loader::new();
     loader.inject_builtin(&mut memory);
 
-    use machine::{Instruction::*, NumericalOperator2::*};
+    use machine::{
+        ExtendedInstruction::*,
+        Instruction::{self, *},
+        NumericalOperator2::*,
+    };
     let instructions = [
         // 0 captured self reference, 1 argument
         LoadInt(2),                    // -> 2
@@ -27,13 +31,13 @@ fn main() -> anyhow::Result<()> {
         LoadInt(1), // -> 4
         Return(4),
         // jump to here
-        LoadInt(1),              // -> 4
-        IntOperator2(Sub, 1, 4), // -> 5
-        Call(0, vec![5]),        // -> 6
-        LoadInt(2),              // -> 7
-        IntOperator2(Sub, 1, 7), // -> 8
-        Call(0, vec![8]),        // -> 9
-        IntOperator2(Add, 6, 9), // -> 10
+        LoadInt(1),                    // -> 4
+        IntOperator2(Sub, 1, 4),       // -> 5
+        Instruction::call(0, vec![5]), // -> 6
+        LoadInt(2),                    // -> 7
+        IntOperator2(Sub, 1, 7),       // -> 8
+        Instruction::call(0, vec![8]), // -> 9
+        IntOperator2(Add, 6, 9),       // -> 10
         Return(10),
     ];
     let fib = InstructionFunction {
@@ -44,21 +48,21 @@ fn main() -> anyhow::Result<()> {
     };
     let instructions = [
         LoadUnit,
-        LoadFunction(Box::new(fib), vec![0]),
+        LoadFunction(Box::new(fib), vec![0]).into(),
         Set(0, 1),
-        LoadInjection("trace".into()),
-        LoadString("start".into()),
-        Call(2, vec![3]),
+        LoadInjection("trace".into()).into(),
+        LoadString("start".into()).into(),
+        Instruction::call(2, vec![3]),
         Rewind(1),
         // LoadInt(10),
         LoadInt(36),
-        Call(0, vec![2]),
+        Instruction::call(0, vec![2]),
         Rewind(0),
-        LoadInjection("int_display_format".into()),
-        Call(1, vec![0]),
+        LoadInjection("int_display_format".into()).into(),
+        Instruction::call(1, vec![0]),
         Rewind(0),
-        LoadInjection("trace".into()),
-        Call(1, vec![0]),
+        LoadInjection("trace".into()).into(),
+        Instruction::call(1, vec![0]),
         Rewind(0),
         Return(0),
     ];
