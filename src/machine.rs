@@ -226,10 +226,18 @@ impl Machine {
                             }
                         }
                         Call(code_i, args_i) => {
-                            let code = unsafe {
-                                self.stack
-                                    .get_downcast_ref::<Code>(frame.stack_offset + *code_i)
-                            }?;
+                            let StackVariable::Address(code_address) =
+                                self.stack.offsets[frame.stack_offset + *code_i].clone()
+                            else {
+                                anyhow::bail!(TypeError {
+                                    expected: type_name::<Code>(),
+                                    content: format!(
+                                        "{:?}",
+                                        self.stack.offsets[frame.stack_offset + *code_i]
+                                    )
+                                })
+                            };
+                            let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
                             anyhow::ensure!(args_i.len() == code.num_parameter);
                             match &code.source {
                                 &CodeSource::Native(function) => {
@@ -245,12 +253,11 @@ impl Machine {
                                     let local_offset = self.stack.locals.len();
                                     let code_id = source.id;
 
-                                    let captures = source
-                                        .captures
-                                        .iter()
-                                        .map(|address| Address(address.clone()))
-                                        .collect::<Vec<_>>();
-                                    self.stack.offsets.extend(captures);
+                                    for address in &source.captures {
+                                        self.stack
+                                            .offsets
+                                            .push(StackVariable::Address(address.clone()))
+                                    }
                                     for i in args_i {
                                         self.stack.offsets.push(
                                             self.stack.offsets[frame.stack_offset + *i].clone(),
@@ -272,25 +279,19 @@ impl Machine {
                         Return(i) => {
                             let popped_frame = self.frames.pop().unwrap();
                             if !self.frames.is_empty() {
-                                let mut variable = self
-                                    .stack
-                                    .offsets
-                                    .drain(popped_frame.stack_offset..)
-                                    .nth(*i)
-                                    .unwrap();
-                                let mut drained_locals =
-                                    self.stack.locals.drain(popped_frame.local_offset..);
+                                let mut variable =
+                                    self.stack.offsets[popped_frame.stack_offset + *i].clone();
+                                let mut locals_len = popped_frame.local_offset;
                                 if let Local(index) = variable {
-                                    if index >= popped_frame.local_offset {
-                                        let local = drained_locals
-                                            .nth(index - popped_frame.local_offset)
-                                            .unwrap();
-                                        drop(drained_locals);
-                                        self.stack.locals.push(local);
-                                        variable = Local(popped_frame.local_offset)
+                                    if index >= locals_len {
+                                        self.stack.locals[locals_len] = self.stack.locals[index];
+                                        variable = Local(locals_len);
+                                        locals_len += 1;
                                     }
                                 }
+                                self.stack.offsets.truncate(popped_frame.stack_offset);
                                 self.stack.offsets.push(variable);
+                                self.stack.locals.truncate(locals_len);
                                 continue 'nonlocal_jump;
                             } else {
                                 unsafe { self.stack.get_unit(popped_frame.stack_offset + *i) }?;

@@ -11,9 +11,6 @@ use memory::Memory;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(all(feature = "profiling", debug_assertions))]
-compile_error!("profiling debug build");
-
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -76,26 +73,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     let code_address = memory.allocate_any(Box::new(code));
     let mut machine = Machine::new();
-
-    #[cfg(feature = "profiling")]
-    let guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(9999)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()?;
-
     machine
         .entry_execute(code_address, &mut memory, &loader)
-        .context(machine.backtrace())?;
-
-    #[cfg(feature = "profiling")]
-    {
-        let report = guard.report().build()?;
-        drop(guard);
-        let profile = report.pprof()?;
-        let mut content = Vec::new();
-        use pprof::protos::Message;
-        profile.encode(&mut content)?;
-        std::fs::write("profile.pb", content)?;
-    }
-    Ok(())
+        .context(machine.backtrace())
 }
