@@ -3,6 +3,13 @@ name = "frivolous"
 version = "0.1.0"
 edition = "2021"
 
+[[example]]
+name = "lang-fib"
+path = "lang/fib.rs"
+
+[features]
+profiling = ["pprof"]
+
 [profile.release]
 debug = true
 lto = true
@@ -10,6 +17,7 @@ lto = true
 [dependencies]
 anyhow = { version = "1.0.86", features = ["backtrace"] }
 derive_more = "0.99.17"
+pprof = { version = "0.13.0", features = ["prost-codec"], optional = true }
 tikv-jemallocator = "0.5.4"
 tracing = { version = "0.1.40", features = ["release_max_level_info"] }
 tracing-subscriber = "0.3.18"

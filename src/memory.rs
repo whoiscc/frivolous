@@ -152,13 +152,13 @@ impl Address {
             }
             err
         })?;
-        any.downcast_ref().ok_or(
+        any.downcast_ref().ok_or_else(|| {
             TypeError {
                 expected: type_name::<T>(),
                 content: format!("Any(id = {:?})", any.type_id()),
             }
-            .into(),
-        )
+            .into()
+        })
     }
 
     pub unsafe fn get_downcast_mut<T: 'static>(&self) -> anyhow::Result<&mut T> {
@@ -172,7 +172,7 @@ impl Address {
             expected: type_name::<T>(),
             content: format!("Any(id = {:?})", (any as &dyn Any).type_id()),
         };
-        any.downcast_mut().ok_or(type_error.into())
+        any.downcast_mut().ok_or_else(|| type_error.into())
     }
 }
 

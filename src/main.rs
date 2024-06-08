@@ -11,6 +11,9 @@ use memory::Memory;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[cfg(all(feature = "profiling", debug_assertions))]
+compile_error!("profiling debug build");
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -21,23 +24,20 @@ fn main() -> anyhow::Result<()> {
     use machine::{Instruction::*, NumericalOperator2::*};
     let instructions = [
         // 0 captured self reference, 1 argument
-        LoadInt(2),
-        IntOperator2(LessEqual, 1, 2),
-        Rewind(2),
-        JumpUnless(2, 6),
-        LoadInt(1),
-        Return(3),
+        LoadInt(2),                    // -> 2
+        IntOperator2(LessEqual, 1, 2), // -> 3
+        JumpUnless(3, 5),
+        LoadInt(1), // -> 4
+        Return(4),
         // jump to here
-        LoadInt(1),
-        IntOperator2(Sub, 1, 3),
-        Call(0, vec![4]),
-        Rewind(3),
-        LoadInt(2),
-        IntOperator2(Sub, 1, 4),
-        Call(0, vec![5]),
-        Rewind(4),
-        IntOperator2(Add, 3, 4),
-        Return(5),
+        LoadInt(1),              // -> 4
+        IntOperator2(Sub, 1, 4), // -> 5
+        Call(0, vec![5]),        // -> 6
+        LoadInt(2),              // -> 7
+        IntOperator2(Sub, 1, 7), // -> 8
+        Call(0, vec![8]),        // -> 9
+        IntOperator2(Add, 6, 9), // -> 10
+        Return(10),
     ];
     let fib = InstructionFunction {
         hints: "fib".into(),
@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         Call(2, vec![3]),
         Rewind(1),
         // LoadInt(10),
-        LoadInt(35),
+        LoadInt(36),
         Call(0, vec![2]),
         Rewind(0),
         LoadInjection("int_display_format".into()),
@@ -76,7 +76,26 @@ fn main() -> anyhow::Result<()> {
     )?;
     let code_address = memory.allocate_any(Box::new(code));
     let mut machine = Machine::new();
+
+    #[cfg(feature = "profiling")]
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(9999)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()?;
+
     machine
         .entry_execute(code_address, &mut memory, &loader)
-        .context(machine.backtrace())
+        .context(machine.backtrace())?;
+
+    #[cfg(feature = "profiling")]
+    {
+        let report = guard.report().build()?;
+        drop(guard);
+        let profile = report.pprof()?;
+        let mut content = Vec::new();
+        use pprof::protos::Message;
+        profile.encode(&mut content)?;
+        std::fs::write("profile.pb", content)?;
+    }
+    Ok(())
 }
