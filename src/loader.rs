@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    machine::{Code, Instruction},
+    machine::{Code, ExtendedInstruction, Instruction, StackOffset},
     memory::{Address, Memory},
 };
 
@@ -49,7 +49,38 @@ mod builtin {
 #[derive(Debug, Default)]
 pub struct Loader {
     pub injections: BTreeMap<String, Address>,
-    pub code: Vec<Vec<Instruction>>,
+    pub code: Vec<LoaderCode>,
+}
+
+#[derive(Debug, Default)]
+pub struct LoaderCode {
+    pub instructions: Vec<Instruction>,
+    pub extended_instructions: Vec<ExtendedInstruction>,
+    pub arg_offsets: Vec<StackOffset>,
+}
+
+impl LoaderCode {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, instruction: Instruction) {
+        self.instructions.push(instruction)
+    }
+
+    pub fn add_call(&mut self, code_i: StackOffset, args_i: Vec<StackOffset>) {
+        let args_offset = self.arg_offsets.len() as _;
+        let num_arg = args_i.len() as _;
+        self.arg_offsets.extend(args_i);
+        self.instructions
+            .push(Instruction::Call(code_i, args_offset, num_arg))
+    }
+
+    pub fn add_extended(&mut self, instruction: ExtendedInstruction) {
+        self.instructions
+            .push(Instruction::Extended(self.extended_instructions.len() as _));
+        self.extended_instructions.push(instruction)
+    }
 }
 
 impl Loader {
@@ -86,7 +117,7 @@ impl Loader {
 pub type InterpretedCodeId = usize;
 
 impl Loader {
-    pub fn add_code(&mut self, code: Vec<Instruction>) -> InterpretedCodeId {
+    pub fn add_code(&mut self, code: LoaderCode) -> InterpretedCodeId {
         let id = self.code.len();
         self.code.push(code);
         id

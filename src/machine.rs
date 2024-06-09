@@ -13,7 +13,7 @@ use crate::{
     memory::{Address, Memory, TypeError},
 };
 
-pub type StackOffset = u8;
+pub type StackOffset = u16;
 pub type InstructionOffset = u32;
 
 #[derive(Debug)]
@@ -24,6 +24,7 @@ pub enum Instruction {
 
     IntOperator2(NumericalOperator2, StackOffset, StackOffset),
     BitwiseOperator2(BitwiseOperator2, StackOffset, StackOffset),
+    Is(StackOffset, StackOffset),
 
     Set(StackOffset, StackOffset),
     // copy current offset to the index, reset current offset to the index
@@ -32,21 +33,10 @@ pub enum Instruction {
     Jump(InstructionOffset),
     JumpUnless(StackOffset, InstructionOffset),
 
-    Call(StackOffset, Box<[StackOffset; 16]>, u8),
+    Call(StackOffset, u16, u8),
     Return(StackOffset),
 
-    Extended(Box<ExtendedInstruction>),
-}
-
-impl Instruction {
-    pub fn call(code: StackOffset, args_i: Vec<StackOffset>) -> Self {
-        let mut call_args_i = Box::new([StackOffset::MAX; 16]);
-        let num_arg = args_i.len() as _;
-        for (i, source_i) in call_args_i.iter_mut().zip(args_i) {
-            *i = source_i
-        }
-        Self::Call(code, call_args_i, num_arg)
-    }
+    Extended(InstructionOffset),
 }
 
 #[derive(Debug)]
@@ -62,17 +52,10 @@ pub enum ExtendedInstruction {
     RecordGet(StackOffset, String),
     TypeGet(StackOffset, String),
     TraitGet(StackOffset, Vec<StackOffset>, String), // (trait, impl types, name)
-    Is(StackOffset, StackOffset),
 
     RecordSet(StackOffset, String, StackOffset),
     TypeSet(StackOffset, String, StackOffset),
     Impl(StackOffset, Vec<StackOffset>, Vec<(String, StackOffset)>),
-}
-
-impl From<ExtendedInstruction> for Instruction {
-    fn from(value: ExtendedInstruction) -> Self {
-        Self::Extended(Box::new(value))
-    }
 }
 
 #[derive(Debug)]
@@ -232,9 +215,9 @@ impl Machine {
             let Some(frame) = self.frames.last_mut() else {
                 anyhow::bail!("evaluating frame is missing")
             };
-            let instructions = &loader.code[frame.code_id];
+            let code = &loader.code[frame.code_id];
             'local_jump: loop {
-                for instruction in &instructions[frame.instruction_offset as usize..] {
+                for instruction in &code.instructions[frame.instruction_offset as usize..] {
                     tracing::trace!("{instruction:?}");
                     frame.instruction_offset += 1;
                     use {ExtendedInstruction::*, Instruction::*};
@@ -249,7 +232,9 @@ impl Machine {
                                 continue 'local_jump;
                             }
                         }
-                        Call(code_i, args_i, num_arg) => {
+                        Call(code_i, arg_offsets_i, num_arg) => {
+                            let args_i = &code.arg_offsets[*arg_offsets_i as usize
+                                ..*arg_offsets_i as usize + *num_arg as usize];
                             let code_address = self
                                 .stack
                                 // this escape is not expected to actually escape anything
@@ -258,7 +243,6 @@ impl Machine {
                             // this should catch any mis-escape without significant damage
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
                             anyhow::ensure!(*num_arg == code.num_parameter);
-                            let args_i = &args_i[..*num_arg as usize];
                             match &code.source {
                                 &CodeSource::Native(function) => {
                                     let arguments = args_i
@@ -311,6 +295,10 @@ impl Machine {
                                     variables_len += 1
                                 }
                                 self.stack.variables.truncate(variables_len);
+                                // this is slower, not sure why
+                                // self.stack
+                                //     .variable_indexes
+                                //     .splice(popped_frame.stack_offset.., [return_offset]);
                                 self.stack
                                     .variable_indexes
                                     .truncate(popped_frame.stack_offset);
@@ -381,7 +369,7 @@ impl Machine {
                         LoadBool(b) => self.stack.push_local(Inline::Bool(*b)),
                         LoadInt(int) => self.stack.push_local(Inline::Int(*int)),
 
-                        Extended(instruction) => match &**instruction {
+                        Extended(offset) => match &code.extended_instructions[*offset as usize] {
                             LoadString(string) => self
                                 .stack
                                 .push_address(memory.allocate_any(Box::new(string.clone()))),
@@ -597,23 +585,21 @@ impl Machine {
                                     "duplicated implementation of trait"
                                 )
                             }
-
-                            Is(i, j) => {
-                                let r = unsafe {
-                                    self.stack
-                                        .get_downcast_ref::<Type>(frame.stack_offset + *j as usize)
-                                }?;
-                                // TODO support other types
-                                let l = unsafe {
-                                    self.stack.get_downcast_ref::<Record>(
-                                        frame.stack_offset + *i as usize,
-                                    )
-                                }?;
-                                self.stack
-                                    .push_local(crate::machine::Inline::Bool(l.type_id == r.id))
-                            }
                         },
 
+                        Is(i, j) => {
+                            let r = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Type>(frame.stack_offset + *j as usize)
+                            }?;
+                            // TODO support other types
+                            let l = unsafe {
+                                self.stack
+                                    .get_downcast_ref::<Record>(frame.stack_offset + *i as usize)
+                            }?;
+                            self.stack
+                                .push_local(crate::machine::Inline::Bool(l.type_id == r.id))
+                        }
                         IntOperator2(op, i, j) => {
                             let l =
                                 unsafe { self.stack.get_int(frame.stack_offset + *i as usize) }?;
