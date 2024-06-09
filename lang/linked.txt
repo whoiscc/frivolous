@@ -1,3 +1,5 @@
+parameter ItemType
+
 let Nil = type layout
 
 let Cons = type layout
@@ -15,62 +17,35 @@ let linked_layout = LinkedLayoutType {
     Cons = Cons,
 }
 
-let length
-let append
-let debug_format
+let LinkedType = type linked_layout
+LinkedType.>Item = ItemType
 
-let Linked = function (ItemType)
-    let LinkedType = type linked_layout
-    LinkedType.>Item = ItemType
-
-    impl Debug[LinkedType]
-        format = debug_format(LinkedType)
-    end
-
-    LinkedType.>length = length
-    LinkedType.>append = append
-    LinkedType
+impl Debug[LinkedType]
+    format = function (linked)
+        match linked
+            is Nil "nil"
+            is Cons begin
+                let s = Debug[LinkedType.>Item].format(linked.head)
+                String.>append(s, " : ")
+                String.>append(s, Debug[LinkedType].format(linked.tail))
+                s
+            end
+        end
 end
 
-set debug_format = function (LinkedType) function (linked)
-    match linked
-        is Nil "Nil"
-        is Cons begin
-            let s = Debug[LinkedType.>Item].format(linked.head)
-            String.>append(s, " : ")
-            String.>append(s, Debug[LinkedType].format(linked.tail))
-            s
-        end
-    end
-
-set length = function (linked)
+LinkedType.>length = function (linked)
     match linked
         is Nil 0
         is Cons 1 + length(linked.tail)
     end
 
-set append = function (linked1, linked2)
+LinkedType.>append = function (linked1, linked2)
     set linked1 = match linked1
         is Nil linked2
         is Cons begin
-            append(linked1.tail, linked2)
+            LinkedType.>append(linked1.tail, linked2)
             linked1
         end
     end
 
-let LinkedInt = Linked(Int)
-
-let xs = Cons {
-    head = 42,
-    tail = Nil,
-}
-trace(Debug[LinkedInt].format(xs))
-
-(function (Type) function (xs, ys)
-    let s = "length = "
-    String.>append(s, Display[Int].format(Type.>length(xs)))
-    trace(s)
-
-    Type.>append(xs, ys)
-    trace(Debug[Type].format(xs))
-end)(LinkedInt)(Cons { head = 43, tail = Nil })
+LinkedType
