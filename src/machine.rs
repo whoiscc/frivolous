@@ -1,4 +1,10 @@
-use std::{any::type_name, collections::BTreeMap, fmt::Display, sync::Arc};
+use std::{
+    any::type_name,
+    cmp::Ordering::{Equal, Greater, Less},
+    collections::BTreeMap,
+    fmt::Display,
+    sync::Arc,
+};
 
 use derive_more::Deref;
 
@@ -7,9 +13,8 @@ use crate::{
     memory::{Address, Memory, TypeError},
 };
 
-pub type CodeId = usize;
 pub type StackOffset = u8;
-pub type InstructionOffset = usize;
+pub type InstructionOffset = u32;
 
 #[derive(Debug)]
 pub enum Instruction {
@@ -35,7 +40,7 @@ pub enum Instruction {
 
 impl Instruction {
     pub fn call(code: StackOffset, args_i: Vec<StackOffset>) -> Self {
-        let mut call_args_i = Box::<[_; 16]>::default();
+        let mut call_args_i = Box::new([StackOffset::MAX; 16]);
         let num_arg = args_i.len() as _;
         for (i, source_i) in call_args_i.iter_mut().zip(args_i) {
             *i = source_i
@@ -107,18 +112,18 @@ pub struct Machine {
 
 #[derive(Debug, Default)]
 struct Stack {
+    variable_indexes: Vec<usize>,
     variables: Vec<Variable>,
-    locals: Vec<Local>,
 }
 
 #[derive(Debug, Clone)]
 enum Variable {
     Address(Address),
-    Local(usize),
+    Inline(Inline),
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Local {
+enum Inline {
     Unit,
     Bool(bool),
     Int(i32),
@@ -128,9 +133,9 @@ enum Local {
 struct Frame {
     code_offset: usize,
     code_id: InterpretedCodeId,
-    variable_offset: usize,
+    stack_offset: usize,
     instruction_offset: InstructionOffset,
-    local_offset: usize,
+    variable_offset: usize,
 }
 
 impl Machine {
@@ -144,8 +149,8 @@ impl Machine {
         memory: &mut Memory,
         loader: &Loader,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.stack.variables.is_empty());
-        assert!(self.stack.locals.is_empty());
+        anyhow::ensure!(self.stack.variable_indexes.is_empty());
+        assert!(self.stack.variables.is_empty());
         anyhow::ensure!(self.frames.is_empty());
         let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
         anyhow::ensure!(code.num_parameter == 0);
@@ -153,20 +158,15 @@ impl Machine {
             anyhow::bail!("unsupported native code entry")
         };
         let code_id = source.id;
-        self.stack.variables.extend(
-            source
-                .captures
-                .iter()
-                .map(|address| Variable::Address(address.clone())),
-        );
-        self.stack
-            .variables
-            .insert(0, Variable::Address(code_address));
+        self.stack.push_address(code_address.clone());
+        for address in &source.captures {
+            self.stack.push_address(address.clone())
+        }
         let frame = Frame {
             code_offset: 0,
-            variable_offset: 1,
+            stack_offset: 1,
             instruction_offset: 0,
-            local_offset: 0,
+            variable_offset: 0,
             code_id,
         };
         self.frames.push(frame);
@@ -177,7 +177,7 @@ impl Machine {
 #[derive(Debug)]
 pub struct BacktraceLine {
     pub code_hints: String,
-    pub instruction_offset: usize,
+    pub instruction_offset: InstructionOffset,
 }
 
 impl Display for BacktraceLine {
@@ -234,72 +234,64 @@ impl Machine {
             };
             let instructions = &loader.code[frame.code_id];
             'local_jump: loop {
-                for instruction in &instructions[frame.instruction_offset..] {
+                for instruction in &instructions[frame.instruction_offset as usize..] {
                     tracing::trace!("{instruction:?}");
                     frame.instruction_offset += 1;
-                    use {ExtendedInstruction::*, Instruction::*, Variable::*};
+                    use {ExtendedInstruction::*, Instruction::*};
                     match instruction {
                         Jump(offset) => {
                             frame.instruction_offset = *offset;
                             continue 'local_jump;
                         }
                         JumpUnless(i, offset) => {
-                            if !unsafe { self.stack.get_bool(frame.variable_offset + *i as usize) }?
-                            {
+                            if !unsafe { self.stack.get_bool(frame.stack_offset + *i as usize) }? {
                                 frame.instruction_offset = *offset;
                                 continue 'local_jump;
                             }
                         }
                         Call(code_i, args_i, num_arg) => {
-                            let Address(code_address) = self.stack.variables
-                                [frame.variable_offset + *code_i as usize]
-                                .clone()
-                            else {
-                                anyhow::bail!(TypeError {
-                                    expected: type_name::<Code>(),
-                                    content: format!(
-                                        "{:?}",
-                                        self.stack.variables
-                                            [frame.variable_offset + *code_i as usize]
-                                    )
-                                })
-                            };
+                            let code_address = self
+                                .stack
+                                // this escape is not expected to actually escape anything
+                                // just abusing it to clone the address
+                                .escape(frame.stack_offset + *code_i as usize, memory);
+                            // this should catch any mis-escape without significant damage
                             let code = unsafe { code_address.get_downcast_ref::<Code>() }?;
                             anyhow::ensure!(*num_arg == code.num_parameter);
+                            let args_i = &args_i[..*num_arg as usize];
                             match &code.source {
                                 &CodeSource::Native(function) => {
                                     let arguments = args_i
                                         .iter()
                                         .map(|i| {
                                             self.stack
-                                                .escape(frame.variable_offset + *i as usize, memory)
+                                                .escape(frame.stack_offset + *i as usize, memory)
                                         })
                                         .collect::<Vec<_>>();
                                     let address = unsafe { function(&arguments, memory) }?;
-                                    self.stack.variables.push(Address(address))
+                                    self.stack.push_address(address)
                                 }
                                 CodeSource::Interpreted(source) => {
-                                    let stack_offset = self.stack.variables.len();
-                                    let local_offset = self.stack.locals.len();
+                                    let stack_offset = self.stack.variable_indexes.len();
+                                    let variable_offset = self.stack.variables.len();
                                     let code_id = source.id;
 
                                     for address in &source.captures {
-                                        self.stack.variables.push(Address(address.clone()))
+                                        self.stack.push_address(address.clone())
                                     }
-                                    for i in &args_i[..*num_arg as usize] {
-                                        self.stack.variables.push(
-                                            self.stack.variables
-                                                [frame.variable_offset + *i as usize]
-                                                .clone(),
+                                    for i in args_i {
+                                        self.stack.variable_indexes.push(
+                                            self.stack.variable_indexes
+                                                [frame.stack_offset + *i as usize],
                                         )
                                     }
 
                                     let frame = Frame {
                                         code_id,
-                                        code_offset: frame.variable_offset + *code_i as usize,
-                                        variable_offset: stack_offset as _,
+                                        code_offset: frame.stack_offset + *code_i as usize,
+                                        stack_offset,
                                         instruction_offset: 0,
-                                        local_offset,
+                                        variable_offset,
                                     };
                                     self.frames.push(frame);
                                     continue 'nonlocal_jump;
@@ -309,104 +301,120 @@ impl Machine {
                         Return(i) => {
                             let popped_frame = self.frames.pop().unwrap();
                             if !self.frames.is_empty() {
-                                let mut variable = self.stack.variables
-                                    [popped_frame.variable_offset + *i as usize]
-                                    .clone();
-                                let mut locals_len = popped_frame.local_offset;
-                                if let Local(index) = variable {
-                                    if index >= locals_len {
-                                        self.stack.locals[locals_len] = self.stack.locals[index];
-                                        variable = Local(locals_len);
-                                        locals_len += 1;
-                                    }
+                                let mut return_offset = self.stack.variable_indexes
+                                    [popped_frame.stack_offset + *i as usize];
+                                let mut variables_len = popped_frame.variable_offset;
+                                if return_offset >= popped_frame.variable_offset {
+                                    self.stack.variables[variables_len] =
+                                        self.stack.variables[return_offset].clone();
+                                    return_offset = variables_len;
+                                    variables_len += 1
                                 }
-                                self.stack.variables.truncate(popped_frame.variable_offset);
-                                self.stack.variables.push(variable);
-                                self.stack.locals.truncate(locals_len);
+                                self.stack.variables.truncate(variables_len);
+                                self.stack
+                                    .variable_indexes
+                                    .truncate(popped_frame.stack_offset);
+                                self.stack.variable_indexes.push(return_offset);
                                 continue 'nonlocal_jump;
                             } else {
                                 unsafe {
-                                    self.stack
-                                        .get_unit(popped_frame.variable_offset + *i as usize)
+                                    self.stack.get_unit(popped_frame.stack_offset + *i as usize)
                                 }?;
+                                self.stack.variable_indexes.clear();
                                 self.stack.variables.clear();
-                                self.stack.locals.clear();
                                 return Ok(());
                             };
                         }
 
                         Set(i, source_i) => {
-                            if let (Local(index), Local(source_index)) = (
-                                &self.stack.variables[frame.variable_offset + *i as usize],
-                                &self.stack.variables[frame.variable_offset + *source_i as usize],
-                            ) {
-                                self.stack.locals[*index] = self.stack.locals[*source_index]
-                            } else {
-                                // TODO optimize some single side local cases
-                                unsafe {
-                                    self.stack
-                                        .escape(frame.variable_offset + *i as usize, memory)
-                                        .copy_from(&self.stack.escape(
-                                            frame.variable_offset + *source_i as usize,
-                                            memory,
-                                        ))
+                            let index =
+                                self.stack.variable_indexes[frame.stack_offset + *i as usize];
+                            let source_index = self.stack.variable_indexes
+                                [frame.stack_offset + *source_i as usize];
+                            'set: {
+                                let (variable, source_variable) = match index.cmp(&source_index) {
+                                    Less => {
+                                        let (variables, other_variables) =
+                                            self.stack.variables.split_at_mut(index + 1);
+                                        (
+                                            variables.last_mut().unwrap(),
+                                            &other_variables[source_index - index - 1],
+                                        )
+                                    }
+                                    Greater => {
+                                        let (variables, other_variables) =
+                                            self.stack.variables.split_at_mut(source_index + 1);
+                                        (
+                                            &mut other_variables[index - source_index - 1],
+                                            variables.last().unwrap(),
+                                        )
+                                    }
+                                    Equal => break 'set,
+                                };
+                                if let (Variable::Inline(inline), Variable::Inline(source_inline)) =
+                                    (variable, source_variable)
+                                {
+                                    *inline = *source_inline
+                                } else {
+                                    // TODO optimize for single inline cases
+                                    unsafe {
+                                        self.stack
+                                            .escape(frame.stack_offset + *i as usize, memory)
+                                            .copy_from(&self.stack.escape(
+                                                frame.stack_offset + *source_i as usize,
+                                                memory,
+                                            ))
+                                    }
                                 }
                             }
                         }
 
                         Rewind(i) => {
-                            anyhow::ensure!(self.stack.variables.len() >= *i as _);
-                            let variable = self.stack.variables.pop().unwrap();
+                            let len = self.stack.variable_indexes.len();
+                            anyhow::ensure!(len >= frame.stack_offset + *i as usize);
                             self.stack
-                                .variables
-                                .splice(frame.variable_offset + *i as usize.., [variable]);
+                                .variable_indexes
+                                .splice(frame.stack_offset + *i as usize..len - 1, []);
                         }
 
-                        LoadUnit => self.stack.push_local(crate::machine::Local::Unit),
-                        LoadBool(b) => self.stack.push_local(crate::machine::Local::Bool(*b)),
-                        LoadInt(int) => self.stack.push_local(crate::machine::Local::Int(*int)),
+                        LoadUnit => self.stack.push_local(Inline::Unit),
+                        LoadBool(b) => self.stack.push_local(Inline::Bool(*b)),
+                        LoadInt(int) => self.stack.push_local(Inline::Int(*int)),
 
                         Extended(instruction) => match &**instruction {
                             LoadString(string) => self
                                 .stack
-                                .variables
-                                .push(Address(memory.allocate_any(Box::new(string.clone())))),
+                                .push_address(memory.allocate_any(Box::new(string.clone()))),
                             LoadFunction(function, captures_i) => {
                                 anyhow::ensure!(captures_i.len() == function.num_capture as _);
                                 let captures = captures_i
                                     .iter()
                                     .map(|i| {
-                                        self.stack
-                                            .escape(frame.variable_offset + *i as usize, memory)
+                                        self.stack.escape(frame.stack_offset + *i as usize, memory)
                                     })
                                     .collect();
-                                self.stack
-                                    .variables
-                                    .push(Address(memory.allocate_any(Box::new(
-                                        Code::new_interpreted(function, captures)?,
-                                    ))))
+                                self.stack.push_address(memory.allocate_any(Box::new(
+                                    Code::new_interpreted(function, captures)?,
+                                )))
                             }
-                            LoadLayout(layout) => self.stack.variables.push(Address(
+                            LoadLayout(layout) => self.stack.push_address(
                                 memory.allocate_any(Box::new(RecordLayout(layout.clone().into()))),
-                            )),
+                            ),
                             LoadType(layout_i) => {
                                 self.type_id_counter += 1;
                                 let t = Type {
                                     id: self.type_id_counter,
                                     layout_address: layout_i.map(|i| {
-                                        self.stack
-                                            .escape(frame.variable_offset + i as usize, memory)
+                                        self.stack.escape(frame.stack_offset + i as usize, memory)
                                     }),
                                     attributes: Default::default(),
                                 };
-                                self.stack
-                                    .variables
-                                    .push(Address(memory.allocate_any(Box::new(t))))
+                                self.stack.push_address(memory.allocate_any(Box::new(t)))
                             }
                             LoadRecord(type_i, variants, fields) => {
                                 let mut t = unsafe {
                                     self.stack.get_downcast_ref::<Type>(
-                                        frame.variable_offset + *type_i as usize,
+                                        frame.stack_offset + *type_i as usize,
                                     )
                                 }?;
                                 for variant in variants {
@@ -451,71 +459,62 @@ impl Machine {
                                         .into_iter()
                                         .map(|i| {
                                             self.stack
-                                                .escape(frame.variable_offset + i as usize, memory)
+                                                .escape(frame.stack_offset + i as usize, memory)
                                         })
                                         .collect(),
                                 };
                                 self.stack
-                                    .variables
-                                    .push(Address(memory.allocate_any(Box::new(record))))
+                                    .push_address(memory.allocate_any(Box::new(record)))
                             }
                             LoadTrait(layout) => {
                                 let t = Trait {
                                     layout: layout.clone().into(),
                                     implementations: Default::default(),
                                 };
-                                self.stack
-                                    .variables
-                                    .push(Address(memory.allocate_any(Box::new(t))))
+                                self.stack.push_address(memory.allocate_any(Box::new(t)))
                             }
                             LoadInjection(key) => {
                                 let Some(address) = loader.injections.get(key) else {
                                     anyhow::bail!("intrinsic {key} not found")
                                 };
-                                self.stack.variables.push(Address(address.clone()))
+                                self.stack.push_address(address.clone())
                             }
 
                             RecordGet(i, name) => {
                                 let record = unsafe {
                                     self.stack.get_downcast_ref::<Record>(
-                                        frame.variable_offset + *i as usize,
+                                        frame.stack_offset + *i as usize,
                                     )
                                 }?;
-                                self.stack
-                                    .variables
-                                    .push(Address(record.get_ref(name)?.clone()))
+                                self.stack.push_address(record.get_ref(name)?.clone())
                             }
                             RecordSet(i, name, j) => {
-                                let address = self
-                                    .stack
-                                    .escape(frame.variable_offset + *j as usize, memory);
+                                let address =
+                                    self.stack.escape(frame.stack_offset + *j as usize, memory);
                                 *unsafe {
                                     self.stack.get_downcast_mut::<Record>(
-                                        frame.variable_offset + *i as usize,
+                                        frame.stack_offset + *i as usize,
                                     )
                                 }?
                                 .get_mut(name)? = address
                             }
                             TypeGet(i, name) => {
                                 let Some(address) = unsafe {
-                                    self.stack.get_downcast_ref::<Type>(
-                                        frame.variable_offset + *i as usize,
-                                    )
+                                    self.stack
+                                        .get_downcast_ref::<Type>(frame.stack_offset + *i as usize)
                                 }?
                                 .attributes
                                 .get(name) else {
                                     anyhow::bail!("there is no attribute {name} on type object")
                                 };
-                                self.stack.variables.push(Address(address.clone()))
+                                self.stack.push_address(address.clone())
                             }
                             TypeSet(i, name, j) => {
-                                let address = self
-                                    .stack
-                                    .escape(frame.variable_offset + *j as usize, memory);
+                                let address =
+                                    self.stack.escape(frame.stack_offset + *j as usize, memory);
                                 let replaced = unsafe {
-                                    self.stack.get_downcast_mut::<Type>(
-                                        frame.variable_offset + *i as usize,
-                                    )
+                                    self.stack
+                                        .get_downcast_mut::<Type>(frame.stack_offset + *i as usize)
                                 }?
                                 .attributes
                                 .insert(name.clone(), address);
@@ -526,9 +525,8 @@ impl Machine {
                             }
                             TraitGet(i, implementor, name) => {
                                 let t = unsafe {
-                                    self.stack.get_downcast_ref::<Trait>(
-                                        frame.variable_offset + *i as usize,
-                                    )
+                                    self.stack
+                                        .get_downcast_ref::<Trait>(frame.stack_offset + *i as usize)
                                 }?;
                                 let Some(p) =
                                     t.layout.iter().position(|other_name| other_name == name)
@@ -539,7 +537,7 @@ impl Machine {
                                 for i in implementor {
                                     let ty = unsafe {
                                         self.stack.get_downcast_ref::<Type>(
-                                            frame.variable_offset + *i as usize,
+                                            frame.stack_offset + *i as usize,
                                         )
                                     }?;
                                     k.push(ty.id)
@@ -547,19 +545,18 @@ impl Machine {
                                 let Some(addresses) = t.implementations.get(&k) else {
                                     anyhow::bail!("implementation not found")
                                 };
-                                self.stack.variables.push(Address(addresses[p].clone()))
+                                self.stack.push_address(addresses[p].clone())
                             }
                             Impl(i, implementor, fields) => {
                                 let t = unsafe {
-                                    self.stack.get_downcast_ref::<Trait>(
-                                        frame.variable_offset + *i as usize,
-                                    )
+                                    self.stack
+                                        .get_downcast_ref::<Trait>(frame.stack_offset + *i as usize)
                                 }?;
                                 let mut k = Vec::new();
                                 for i in implementor {
                                     let t = unsafe {
                                         self.stack.get_downcast_ref::<Type>(
-                                            frame.variable_offset + *i as usize,
+                                            frame.stack_offset + *i as usize,
                                         )
                                     }?;
                                     k.push(t.id)
@@ -585,14 +582,12 @@ impl Machine {
                                 let addresses = offsets
                                     .into_iter()
                                     .map(|i| {
-                                        self.stack
-                                            .escape(frame.variable_offset + i as usize, memory)
+                                        self.stack.escape(frame.stack_offset + i as usize, memory)
                                     })
                                     .collect();
                                 let replaced = unsafe {
-                                    self.stack.get_downcast_mut::<Trait>(
-                                        frame.variable_offset + *i as usize,
-                                    )
+                                    self.stack
+                                        .get_downcast_mut::<Trait>(frame.stack_offset + *i as usize)
                                 }
                                 .unwrap()
                                 .implementations
@@ -605,28 +600,27 @@ impl Machine {
 
                             Is(i, j) => {
                                 let r = unsafe {
-                                    self.stack.get_downcast_ref::<Type>(
-                                        frame.variable_offset + *j as usize,
-                                    )
+                                    self.stack
+                                        .get_downcast_ref::<Type>(frame.stack_offset + *j as usize)
                                 }?;
                                 // TODO support other types
                                 let l = unsafe {
                                     self.stack.get_downcast_ref::<Record>(
-                                        frame.variable_offset + *i as usize,
+                                        frame.stack_offset + *i as usize,
                                     )
                                 }?;
                                 self.stack
-                                    .push_local(crate::machine::Local::Bool(l.type_id == r.id))
+                                    .push_local(crate::machine::Inline::Bool(l.type_id == r.id))
                             }
                         },
 
                         IntOperator2(op, i, j) => {
                             let l =
-                                unsafe { self.stack.get_int(frame.variable_offset + *i as usize) }?;
+                                unsafe { self.stack.get_int(frame.stack_offset + *i as usize) }?;
                             let r =
-                                unsafe { self.stack.get_int(frame.variable_offset + *j as usize) }?;
-                            tracing::debug!("  {op:?} {l} {r}");
-                            use {crate::machine::Local::*, NumericalOperator2::*};
+                                unsafe { self.stack.get_int(frame.stack_offset + *j as usize) }?;
+                            tracing::trace!("  {op:?} {l} {r}");
+                            use {Inline::*, NumericalOperator2::*};
                             let local = match op {
                                 Add => Int(l + r),
                                 Sub => Int(l - r),
@@ -641,10 +635,10 @@ impl Machine {
                         }
                         BitwiseOperator2(op, i, j) => {
                             let l =
-                                unsafe { self.stack.get_int(frame.variable_offset + *i as usize) }?;
+                                unsafe { self.stack.get_int(frame.stack_offset + *i as usize) }?;
                             let r =
-                                unsafe { self.stack.get_int(frame.variable_offset + *j as usize) }?;
-                            use crate::machine::{BitwiseOperator2::*, Local::*};
+                                unsafe { self.stack.get_int(frame.stack_offset + *j as usize) }?;
+                            use crate::machine::{BitwiseOperator2::*, Inline::*};
                             let local = match op {
                                 And => Int(l & r),
                                 Or => Int(l | r),
@@ -662,21 +656,25 @@ impl Machine {
 }
 
 impl Stack {
-    fn push_local(&mut self, local: Local) {
-        let index = self.locals.len();
-        self.locals.push(local);
-        self.variables.push(Variable::Local(index))
+    fn push_local(&mut self, inline: Inline) {
+        self.variable_indexes.push(self.variables.len());
+        self.variables.push(Variable::Inline(inline))
+    }
+
+    fn push_address(&mut self, address: Address) {
+        self.variable_indexes.push(self.variables.len());
+        self.variables.push(Variable::Address(address))
     }
 
     fn escape(&mut self, i: usize, memory: &mut Memory) -> Address {
-        let variable = &mut self.variables[i];
+        let variable = &mut self.variables[self.variable_indexes[i]];
         match variable {
             Variable::Address(address) => address.clone(),
-            Variable::Local(index) => {
-                let address = match &self.locals[*index] {
-                    Local::Unit => memory.allocate_unit(),
-                    Local::Bool(b) => memory.allocate_bool(*b),
-                    Local::Int(int) => memory.allocate_int(*int),
+            Variable::Inline(inline) => {
+                let address = match inline {
+                    Inline::Unit => memory.allocate_unit(),
+                    Inline::Bool(b) => memory.allocate_bool(*b),
+                    Inline::Int(int) => memory.allocate_int(*int),
                 };
                 *variable = Variable::Address(address.clone());
                 address
@@ -685,68 +683,61 @@ impl Stack {
     }
 
     unsafe fn get_unit(&self, i: usize) -> anyhow::Result<()> {
-        match &self.variables[i] {
+        let variable = &self.variables[self.variable_indexes[i]];
+        match variable {
             Variable::Address(address) => unsafe { address.get_unit() },
-            Variable::Local(index) => {
-                let Local::Unit = &self.locals[*index] else {
-                    anyhow::bail!(TypeError {
-                        expected: "bool",
-                        content: format!("{:?}", self.variables[i])
-                    })
-                };
-                Ok(())
-            }
+            Variable::Inline(Inline::Unit) => Ok(()),
+            _ => anyhow::bail!(TypeError {
+                expected: "Unit",
+                content: format!("{variable:?}")
+            }),
         }
     }
 
     unsafe fn get_bool(&self, i: usize) -> anyhow::Result<bool> {
-        match &self.variables[i] {
+        let variable = &self.variables[self.variable_indexes[i]];
+        match variable {
             Variable::Address(address) => unsafe { address.get_bool() },
-            Variable::Local(index) => {
-                let Local::Bool(b) = &self.locals[*index] else {
-                    anyhow::bail!(TypeError {
-                        expected: "bool",
-                        content: format!("{:?}", self.variables[i])
-                    })
-                };
-                Ok(*b)
-            }
+            Variable::Inline(Inline::Bool(b)) => Ok(*b),
+            _ => anyhow::bail!(TypeError {
+                expected: "Bool",
+                content: format!("{variable:?}")
+            }),
         }
     }
 
     unsafe fn get_int(&self, i: usize) -> anyhow::Result<i32> {
-        match &self.variables[i] {
+        let variable = &self.variables[self.variable_indexes[i]];
+        match variable {
             Variable::Address(address) => unsafe { address.get_int() },
-            Variable::Local(index) => {
-                let Local::Int(int) = &self.locals[*index] else {
-                    anyhow::bail!(TypeError {
-                        expected: "int",
-                        content: format!("{:?}", self.variables[i])
-                    })
-                };
-                Ok(*int)
-            }
+            Variable::Inline(Inline::Int(int)) => Ok(*int),
+            _ => anyhow::bail!(TypeError {
+                expected: "Int",
+                content: format!("{variable:?}")
+            }),
         }
     }
 
     unsafe fn get_downcast_ref<T: 'static>(&self, i: usize) -> anyhow::Result<&T> {
-        let Variable::Address(address) = &self.variables[i] else {
+        let variable = &self.variables[self.variable_indexes[i]];
+        let Variable::Address(address) = variable else {
             anyhow::bail!(TypeError {
                 expected: type_name::<T>(),
-                content: format!("{:?}", self.variables[i])
+                content: format!("{variable:?}")
             })
         };
-        address.get_downcast_ref()
+        unsafe { address.get_downcast_ref() }
     }
 
     unsafe fn get_downcast_mut<T: 'static>(&self, i: usize) -> anyhow::Result<&mut T> {
-        let Variable::Address(address) = &self.variables[i] else {
+        let variable = &self.variables[self.variable_indexes[i]];
+        let Variable::Address(address) = variable else {
             anyhow::bail!(TypeError {
                 expected: type_name::<T>(),
-                content: format!("{:?}", self.variables[i])
+                content: format!("{variable:?}")
             })
         };
-        address.get_downcast_mut()
+        unsafe { address.get_downcast_mut() }
     }
 }
 

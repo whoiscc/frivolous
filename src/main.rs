@@ -47,24 +47,19 @@ fn main() -> anyhow::Result<()> {
         id: loader.add_code(instructions.into()),
     };
     let instructions = [
-        LoadUnit,
-        LoadFunction(Box::new(fib), vec![0]).into(),
+        LoadUnit,                                    // -> 0
+        LoadFunction(Box::new(fib), vec![0]).into(), // -> 1
         Set(0, 1),
-        LoadInjection("trace".into()).into(),
-        LoadString("start".into()).into(),
-        Instruction::call(2, vec![3]),
-        Rewind(1),
-        // LoadInt(10),
-        LoadInt(36),
-        Instruction::call(0, vec![2]),
-        Rewind(0),
-        LoadInjection("int_display_format".into()).into(),
-        Instruction::call(1, vec![0]),
-        Rewind(0),
-        LoadInjection("trace".into()).into(),
-        Instruction::call(1, vec![0]),
-        Rewind(0),
-        Return(0),
+        LoadInjection("trace".into()).into(), // -> 2
+        LoadString("start".into()).into(),    // -> 3
+        Instruction::call(2, vec![3]),        // -> 4
+        LoadInt(36),                          // -> 5
+        Instruction::call(0, vec![5]),        // -> 6
+        LoadInjection("int_display_format".into()).into(), // -> 7
+        Instruction::call(7, vec![6]),        // -> 8
+        LoadInjection("trace".into()).into(), // -> 9
+        Instruction::call(9, vec![8]),        // -> 10
+        Return(10),
     ];
     let code = Code::new_interpreted(
         &InstructionFunction {
