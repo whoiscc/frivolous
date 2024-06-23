@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub type StackOffset = u16;
-pub type InstructionOffset = u32;
+pub type InstructionOffset = u16;
 
 #[derive(Debug)]
 pub enum Instruction {
@@ -114,10 +114,16 @@ enum Inline {
 
 #[derive(Debug)]
 struct Frame {
-    code_offset: usize,
     code_id: InterpretedCodeId,
+    // offsets into Stack's `variable_indexes`
+    // these are the base offsets of `StackOffset` types, but themselves are not `StackOffset` typed
+    // because `StackOffset` accounts for offset within one frame, while these are accumulated
+    // offsets over the whole frame stack
+    code_offset: usize,
     stack_offset: usize,
+    // offset into LoaderCode's instructions
     instruction_offset: InstructionOffset,
+    // offset into Stack's `variables`
     variable_offset: usize,
 }
 

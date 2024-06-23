@@ -6,13 +6,14 @@ use anyhow::Context;
 use loader::{Loader, LoaderCode};
 use machine::{Code, InstructionFunction, Machine};
 use memory::Memory;
+use tracing_subscriber::fmt::time::Uptime;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_timer(Uptime::default()).init();
 
     let mut memory = Memory::new();
     let mut loader = Loader::new();

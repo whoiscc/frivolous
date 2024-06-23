@@ -5,7 +5,6 @@ use std::{
 
 // not impl Copy and Default intentionally
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-// pub struct Address(std::num::NonZeroU8, [u8; 7]);
 pub struct Address(u64);
 
 #[derive(Debug, Default)]

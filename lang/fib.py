@@ -1,5 +1,4 @@
-from datetime import datetime, UTC
-
+from logging import basicConfig, info, INFO
 
 def main():
     fib = None
@@ -9,10 +8,10 @@ def main():
         else:
             return fib(n - 1) + fib(n - 2)
     fib = f
-    print(datetime.now(UTC).isoformat(), "start")
-    result = fib(36)
-    print(datetime.now(UTC).isoformat(), result)
+    info("start")
+    info(fib(36))
 
 
 if __name__ == "__main__":
+    basicConfig(format="{relativeCreated:>14.6f}ms {levelname} {module} {message}", style="{", level=INFO)
     main()
