@@ -217,6 +217,8 @@ impl Machine {
     }
 
     fn evaluate(&mut self, memory: &mut Memory, loader: &Loader) -> anyhow::Result<()> {
+        // TODO decide whether necessary to enable this optimization
+        // let mut arguments = Vec::new(); // reused buffer for native calls
         'nonlocal_jump: loop {
             let Some(frame) = self.frames.last_mut() else {
                 anyhow::bail!("evaluating frame is missing")
@@ -251,6 +253,12 @@ impl Machine {
                             anyhow::ensure!(*num_arg == code.num_parameter);
                             match &code.source {
                                 &CodeSource::Native(function) => {
+                                    // arguments.extend(args_i
+                                    //     .iter()
+                                    //     .map(|i| {
+                                    //         self.stack
+                                    //             .escape(frame.stack_offset + *i as usize, memory)
+                                    //     }));
                                     let arguments = args_i
                                         .iter()
                                         .map(|i| {
@@ -259,11 +267,11 @@ impl Machine {
                                         })
                                         .collect::<Vec<_>>();
                                     let address = unsafe { function(&arguments, memory) }?;
+                                    // arguments.drain(..);
                                     self.stack.push_address(address)
                                 }
                                 CodeSource::Interpreted(source) => {
                                     let stack_offset = self.stack.variable_indexes.len();
-                                    let variable_offset = self.stack.variables.len();
                                     let code_id = source.id;
 
                                     for address in &source.captures {
@@ -281,7 +289,7 @@ impl Machine {
                                         code_offset: frame.stack_offset + *code_i as usize,
                                         stack_offset,
                                         instruction_offset: 0,
-                                        variable_offset,
+                                        variable_offset: self.stack.variables.len(),
                                     };
                                     self.frames.push(frame);
                                     continue 'nonlocal_jump;
@@ -343,7 +351,7 @@ impl Machine {
                                             variables.last().unwrap(),
                                         )
                                     }
-                                    Equal => break 'set,
+                                    Equal => break 'set, // no-op silly case, probably never happen
                                 };
                                 if let (Variable::Inline(inline), Variable::Inline(source_inline)) =
                                     (variable, source_variable)

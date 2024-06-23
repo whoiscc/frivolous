@@ -1,11 +1,7 @@
-pub mod loader;
-pub mod machine;
-pub mod memory;
-
 use anyhow::Context;
-use loader::{Loader, LoaderCode};
-use machine::{Code, InstructionFunction, Machine};
-use memory::Memory;
+use frivolous::loader::{Loader, LoaderCode};
+use frivolous::machine::{Code, InstructionFunction, Machine};
+use frivolous::memory::Memory;
 use tracing_subscriber::fmt::time::Uptime;
 
 #[cfg(not(target_env = "msvc"))]
@@ -13,13 +9,15 @@ use tracing_subscriber::fmt::time::Uptime;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_timer(Uptime::default()).init();
+    tracing_subscriber::fmt()
+        .with_timer(Uptime::default())
+        .init();
 
     let mut memory = Memory::new();
     let mut loader = Loader::new();
     loader.inject_builtin(&mut memory);
 
-    use machine::{ExtendedInstruction::*, Instruction::*, NumericalOperator2::*};
+    use frivolous::machine::{ExtendedInstruction::*, Instruction::*, NumericalOperator2::*};
     let mut code = LoaderCode::new();
     // 0 captured self reference, 1 argument
     code.add(LoadInt(2)); // -> 2

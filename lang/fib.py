@@ -1,5 +1,6 @@
 from logging import basicConfig, info, INFO
 
+
 def main():
     fib = None
     def f(n):
