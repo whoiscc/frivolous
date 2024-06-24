@@ -3,3 +3,4 @@
 pub mod loader;
 pub mod machine;
 pub mod memory;
+pub mod parse;
