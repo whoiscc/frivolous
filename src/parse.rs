@@ -3,9 +3,9 @@ use std::str::FromStr;
 use nom::{
     branch::alt,
     bytes::complete::{escaped_transform, is_not, tag},
-    character::complete::{alpha1, alphanumeric0, multispace0},
-    combinator::{all_consuming, cond, opt, recognize, value, verify},
-    multi::separated_list0,
+    character::complete::{alpha1, alphanumeric0, char, multispace1, not_line_ending},
+    combinator::{all_consuming, cond, opt, recognize, success, value, verify},
+    multi::{many1, separated_list0},
     sequence::{delimited, pair, preceded, separated_pair, tuple},
     Finish, IResult, Parser,
 };
@@ -40,7 +40,7 @@ impl FromStr for Source {
     type Err = nom::error::Error<String>;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match all_consuming(delimited(multispace0, sequence_inner, multispace0))(s).finish() {
+        match all_consuming(delimited(token_break, sequence_inner, token_break))(s).finish() {
             Ok((_, items)) => Ok(Self(items)),
             Err(err) => Err(nom::error::Error {
                 input: err.input.into(),
@@ -62,13 +62,17 @@ fn expr(input: &str) -> IResult<&str, Node> {
 
 fn expr0(input: &str) -> IResult<&str, Node> {
     alt((
+        id.map(|id| Node::Id(id.into())),
         literal_bool,
         literal_int,
         literal_string,
         if_else,
         expr_while,
         function,
-        id.map(|id| Node::Id(id.into())),
+        item_set,
+        value(Node::Break, tag("break")),
+        value(Node::Continue, tag("continue")),
+        preceded(pair(tag("return"), token_break), expr).map(|expr| Node::Return(expr.into())),
         sequence::<false>,
         // TODO parentheses
     ))(input)
@@ -90,8 +94,9 @@ fn literal_bool(input: &str) -> IResult<&str, Node> {
 }
 
 fn literal_int(input: &str) -> IResult<&str, Node> {
-    let (remaining, int) = nom::character::complete::i32(input)?;
-    Ok((remaining, Node::LiteralInt(int)))
+    nom::character::complete::i32
+        .map(Node::LiteralInt)
+        .parse(input)
 }
 
 fn literal_string(input: &str) -> IResult<&str, Node> {
@@ -100,10 +105,10 @@ fn literal_string(input: &str) -> IResult<&str, Node> {
         '\\',
         alt((
             // TODO
-            value("\n", tag("n")),
+            value("\n", char('n')),
         )),
     );
-    let (remaining, string) = delimited(tag("\""), quoted, tag("\""))(input)?;
+    let (remaining, string) = delimited(char('"'), quoted, char('"'))(input)?;
     Ok((remaining, Node::LiteralString(string)))
 }
 
@@ -111,22 +116,23 @@ fn id(input: &str) -> IResult<&str, &str> {
     let parser = recognize(pair(alpha1, alphanumeric0));
     verify(parser, |id| {
         ![
-            "function", "begin", "end", "if", "else", "while", "let", "set",
+            "function", "begin", "end", "if", "else", "while", "let", "set", "true", "false",
+            "break", "continue", "return",
         ]
         .contains(id)
     })(input)
 }
 
 fn item_let(input: &str) -> IResult<&str, Node> {
-    let (input, id) = preceded(pair(tag("let"), multispace0), id)(input)?;
+    let (input, id) = preceded(pair(tag("let"), token_break), id)(input)?;
     let (remaining, expr) =
-        opt(preceded(tuple((multispace0, tag("="), multispace0)), expr))(input)?;
+        opt(preceded(tuple((token_break, char('='), token_break)), expr))(input)?;
     Ok((remaining, Node::Let(id.into(), expr.map(Into::into))))
 }
 
 fn item_set(input: &str) -> IResult<&str, Node> {
-    let parser = separated_pair(id, tuple((multispace0, tag("="), multispace0)), expr);
-    let (remaining, (id, expr)) = preceded(pair(tag("set"), multispace0), parser)(input)?;
+    let parser = separated_pair(id, tuple((token_break, char('='), token_break)), expr);
+    let (remaining, (id, expr)) = preceded(pair(tag("set"), token_break), parser)(input)?;
     Ok((remaining, Node::Set(id.into(), expr.into())))
 }
 
@@ -136,31 +142,31 @@ fn operator2(input: &str) -> IResult<&str, Node> {
 
 fn call(input: &str) -> IResult<&str, Node> {
     let arguments = delimited(
-        pair(tag("("), multispace0),
-        separated_list0(pair(tag(","), multispace0), expr),
-        tuple((opt(pair(multispace0, tag(","))), multispace0, tag(")"))),
+        pair(char('('), token_break),
+        separated_list0(pair(char(','), token_break), expr),
+        tuple((opt(pair(token_break, char(','))), token_break, char(')'))),
     );
-    let (remaining, (callee, arguments)) = separated_pair(expr0, multispace0, arguments)(input)?;
+    let (remaining, (callee, arguments)) = separated_pair(expr0, token_break, arguments)(input)?;
     Ok((remaining, Node::Call(callee.into(), arguments)))
 }
 
 fn sequence<const OMIT_BEGIN: bool>(input: &str) -> IResult<&str, Node> {
     let (remaining, items) = delimited(
-        tuple((cond(!OMIT_BEGIN, tag("begin")), multispace0)),
+        tuple((cond(!OMIT_BEGIN, tag("begin")), token_break)),
         sequence_inner,
-        pair(multispace0, tag("end")),
+        pair(token_break, tag("end")),
     )(input)?;
     Ok((remaining, Node::Sequence(items)))
 }
 
 fn if_else(input: &str) -> IResult<&str, Node> {
     // thinking of denying sequence expression in test expression all together
-    let test = preceded(pair(tag("if"), multispace0), expr);
-    let negative = preceded(pair(tag("else"), multispace0), expr2);
+    let test = preceded(pair(tag("if"), token_break), expr);
+    let negative = preceded(pair(tag("else"), token_break), expr2);
     let (remaining, (test, (positive, negative))) = separated_pair(
         test,
-        multispace0,
-        separated_pair(expr2, multispace0, opt(negative)),
+        token_break,
+        separated_pair(expr2, token_break, opt(negative)),
     )(input)?;
     Ok((
         remaining,
@@ -176,21 +182,21 @@ fn expr_while(input: &str) -> IResult<&str, Node> {
     //   loop condition?
     // end
     //   continue
-    let test = preceded(pair(tag("while"), multispace0), expr2);
-    let (remaining, (test, expr)) = separated_pair(test, multispace0, expr2)(input)?;
+    let test = preceded(pair(tag("while"), token_break), expr2);
+    let (remaining, (test, expr)) = separated_pair(test, token_break, expr2)(input)?;
     Ok((remaining, Node::While(test.into(), expr.into())))
 }
 
 fn function(input: &str) -> IResult<&str, Node> {
     let parameters = preceded(
-        pair(tag("function"), multispace0),
+        pair(tag("function"), token_break),
         delimited(
-            tag("("),
-            separated_list0(pair(tag(","), multispace0), id),
-            tuple((opt(pair(multispace0, tag(","))), multispace0, tag(")"))),
+            char('('),
+            separated_list0(pair(char(','), token_break), id),
+            tuple((opt(pair(token_break, char(','))), token_break, char(')'))),
         ),
     );
-    let (remaining, (parameters, expr)) = separated_pair(parameters, multispace0, expr2)(input)?;
+    let (remaining, (parameters, expr)) = separated_pair(parameters, token_break, expr2)(input)?;
     Ok((
         remaining,
         Node::Function(
@@ -201,7 +207,15 @@ fn function(input: &str) -> IResult<&str, Node> {
 }
 
 fn sequence_inner(input: &str) -> IResult<&str, Vec<Node>> {
-    separated_list0(multispace0, alt((item_let, item_set, expr)))(input)
+    separated_list0(token_break, alt((item_let, expr)))(input)
+}
+
+fn comment(input: &str) -> IResult<&str, &str> {
+    recognize(pair(char(';'), not_line_ending))(input)
+}
+
+fn token_break(input: &str) -> IResult<&str, &str> {
+    alt((recognize(many1(alt((comment, multispace1)))), success("")))(input)
 }
 
 #[cfg(test)]
