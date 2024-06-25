@@ -66,7 +66,7 @@ pub struct InstructionFunction {
     pub id: InterpretedCodeId,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NumericalOperator2 {
     Add,
     Sub,

@@ -1,48 +1,43 @@
 parameter ItemType
 
-let Nil = type layout
+let Nil type layout
 
-let Cons = type layout
+let Cons type layout
     * head
     * tail
 end
 
-let LinkedLayoutType = type layout
+let LinkedLayoutType type layout
     * Nil
     * Cons
 end
 
-let linked_layout = LinkedLayoutType {    
-    Nil = Nil,
-    Cons = Cons,
-}
+let linked_layout LinkedLayoutType { Nil Nil, Cons Cons }
 
-let LinkedType = type linked_layout
-LinkedType.>Item = ItemType
+let LinkedType type linked_layout
+set LinkedType.>Item ItemType
 
 impl Debug[LinkedType]
-    format = function (linked)
-        match linked
-            is Nil "nil"
-            is Cons begin
-                let s = Debug[LinkedType.>Item].format(linked.head)
-                String.>append(s, " : ")
-                String.>append(s, Debug[LinkedType].format(linked.tail))
-                s
-            end
+    format function (linked) match linked
+        is Nil "nil"
+        is Cons then
+            let s Debug[LinkedType.>Item].format(linked.head)
+            String.>append(s, " : ")
+            String.>append(s, Debug[LinkedType].format(linked.tail))
+            s
         end
+    end
 end
 
-LinkedType.>length = function (linked)
-    match linked
-        is Nil 0
-        is Cons 1 + length(linked.tail)
-    end
+set LinkedType.>length function (linked) match linked
+    is Nil 0
+    is Cons 1 + length(linked.tail)
+end
 
-LinkedType.>append = function (linked1, linked2)
+set LinkedType.>append function (linked1, linked2)
     set linked1 = match linked1
         is Nil linked2
-        is Cons begin
+        is Cons then
             LinkedType.>append(linked1.tail, linked2)
             linked1
         end
