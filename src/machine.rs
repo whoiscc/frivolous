@@ -376,7 +376,7 @@ impl Machine {
                             anyhow::ensure!(len >= frame.stack_offset + *i as usize);
                             self.stack
                                 .variable_indexes
-                                .splice(frame.stack_offset + *i as usize..len - 1, []);
+                                .truncate(frame.stack_offset + *i as usize)
                         }
 
                         LoadUnit => self.stack.push_local(Inline::Unit),

@@ -10,6 +10,6 @@ fn main() -> anyhow::Result<()> {
         .with_timer(Uptime::default())
         .init();
 
-    println!("{:?}", Source::new(include_str!("../lang/fib.txt"))?);
+    println!("{:#?}", Source::new(include_str!("../lang/fib.txt"))?);
     Ok(())
 }

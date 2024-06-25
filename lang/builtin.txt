@@ -1,33 +1,33 @@
-let Unit = inject unit_type
+let Unit be inject unit_type
 
 impl Debug[Unit]
-    format = function (unit) "Unit"
+    format function (unit) "Unit"
 end
 
 impl Display[Unit]
-    format = function (unit) "Unit"
+    format function (unit) "Unit"
 end
 
-let Int = inject int_type
+let Int be inject int_type
 
 impl Debug[Int]
-    format = inject int_debug_format
+    format inject int_debug_format
 end
 
 impl Display[Int]
-    format = inject int_display_format
+    format inject int_display_format
 end
 
-let String = type native
+let String be type native
 
 impl Debug[String]
-    format = inject string_debug_format
+    format inject string_debug_format
 end
 
 impl Display[String]
-    format = function (string) string
+    format function (string) string
 end
 
-String.>append = inject string_append
+set String.>append inject string_append
 
-let trace = inject trace
+let trace be inject trace

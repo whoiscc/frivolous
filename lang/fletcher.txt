@@ -1,4 +1,4 @@
-let State type layout
+let State be type layout
     * sum1
     * sum2
 end

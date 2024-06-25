@@ -5,4 +5,4 @@ set fib function (n)
     else
         fib(n - 1) + fib(n - 2)
 
-trace(Display[Int].format(fib(10)))
+;trace(Display[Int].format(fib(10)))

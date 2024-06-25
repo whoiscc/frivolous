@@ -1,11 +1,11 @@
-let Linked = inject Linked
-let LinkedInt = Linked(Int)
+let Linked be inject Linked
+let LinkedInt be Linked(Int)
 
-let xs = LinkedInt.Cons { head = 42, tail = LinkedInt.Nil }
+let xs be LinkedInt.Cons { head 42, tail LinkedInt.Nil }
 trace(Debug[LinkedInt].format(xs))
 
-let generic_demo = function (Type) function (xs, ys)
-    let s = "length = "
+let generic_demo be function (Type) function (xs, ys)
+    let s be "length = "
     String.>append(s, Display[Int].format(Type.>length(xs)))
     trace(s)
 

@@ -1,7 +1,7 @@
-let Debug trait
+let Debug be trait
     * format
 end
 
-let Display trait
+let Display be trait
     * format
 end

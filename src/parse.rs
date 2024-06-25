@@ -127,7 +127,7 @@ fn id(input: &str) -> IResult<&str, &str> {
     let parser = recognize(pair(alpha1, alphanumeric0));
     verify(parser, |id| {
         ![
-            "function", "begin", "end", "if", "then", "else", "while", "let", "set", "true",
+            "function", "begin", "end", "if", "then", "else", "while", "let", "be", "set", "true",
             "false", "break", "continue", "return",
         ]
         .contains(id)
@@ -136,7 +136,8 @@ fn id(input: &str) -> IResult<&str, &str> {
 
 fn item_let(input: &str) -> IResult<&str, Node> {
     let (input, id) = preceded(pair(tag("let"), token_break), id)(input)?;
-    let (remaining, expr) = opt(preceded(token_break, expr))(input)?;
+    let (remaining, expr) =
+        opt(preceded(tuple((token_break, tag("be"), token_break)), expr))(input)?;
     Ok((remaining, Node::Let(id.into(), expr.map(Into::into))))
 }
 
@@ -192,8 +193,11 @@ fn if_else(input: &str) -> IResult<&str, Node> {
         test,
         token_break,
         alt((
-            terminated(pair(positive, negative), pair(token_break, tag("end"))),
-            pair(positive_expr, negative_expr),
+            terminated(
+                separated_pair(positive, token_break, negative),
+                pair(token_break, tag("end")),
+            ),
+            separated_pair(positive_expr, token_break, negative_expr),
         )),
     )(input)?;
     Ok((remaining, Node::IfElse(test.into(), positive, negative)))

@@ -1,20 +1,20 @@
 parameter ItemType
 
-let Nil type layout
+let Nil be type layout
 
-let Cons type layout
+let Cons be type layout
     * head
     * tail
 end
 
-let LinkedLayoutType type layout
+let LinkedLayoutType be type layout
     * Nil
     * Cons
 end
 
-let linked_layout LinkedLayoutType { Nil Nil, Cons Cons }
+let linked_layout be LinkedLayoutType { Nil Nil, Cons Cons }
 
-let LinkedType type linked_layout
+let LinkedType be type linked_layout
 set LinkedType.>Item ItemType
 
 impl Debug[LinkedType]
